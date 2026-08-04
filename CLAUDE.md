@@ -110,7 +110,7 @@ Dependencies are declared once, in `pyproject.toml`'s `dependencies` list.
   `_*.html` are HTMX fragments, not full pages. This project's Starlette
   version requires **`TemplateResponse(request, name, context)`**
   (request first) — the older `TemplateResponse(name, {"request": ...})`
-  form breaks here. Styling is Tailwind via the CDN script in
+  form breaks here. Styling is Tailwind via a CDN script in
   `base.html` — no custom `<style>` blocks, no custom CSS classes; use
   Tailwind utility classes directly. Status-badge colors are a Jinja
   dict literal (`badge_classes`) **duplicated in three templates**
@@ -118,6 +118,45 @@ Dependencies are declared once, in `pyproject.toml`'s `dependencies` list.
   a new status value needs all three updated. Templates ship as package
   data (`pyproject.toml`'s `[tool.setuptools.package-data]`); new
   `.html` files need no config change, other asset types would.
+  **Deliberately tracks the latest major of both htmx and Tailwind** —
+  `base.html` pins **htmx 4.x beta** (`https://unpkg.com/htmx.org@4.0.0-beta6`)
+  and **Tailwind v4** via
+  `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4` — *not*
+  `cdn.tailwindcss.com` (the old "Play CDN"), which only ever serves
+  Tailwind v3 and was never updated for v4. `@tailwindcss/browser` is
+  Tailwind's own v4-era replacement: same script-tag, no-build-step,
+  scans-the-DOM-at-runtime behavior, just published under a different
+  package. **htmx 4 is pre-release** (npm's `latest` dist-tag still
+  points at 2.0.10; 4.x only exists under the `next` tag and is still
+  moving between betas) — re-check this pin against
+  `npm view htmx.org dist-tags` periodically and bump to a newer beta or
+  the eventual stable release; don't assume beta6's behavior is final.
+  When bumping either library, re-pin to the new exact version (don't
+  leave it floating) and re-verify against the actual downloaded bundle,
+  not just changelog prose — htmx 4's docs site describes some changes
+  imprecisely (e.g. it renamed swap-related events to colon-separated
+  names like `htmx:after:swap`, confirmed by grepping the real bundle
+  for `htmx:` string literals, not by trusting the docs alone). Known
+  v4 changes relevant here: `htmx.config.allowScriptTags` was removed
+  as a *setting*, but the behavior it used to gate (creating a fresh
+  `<script>` element to force execution of inline `<script>` tags in
+  swapped content) is now unconditional — so `_form_dialog.html`'s
+  inline `<script>` (the sample-payload auto-fill) still works, now
+  without an escape hatch to disable it. `htmx.ajax(method, url, ctx)`
+  keeps the same signature this codebase relies on (used directly in
+  `_detail_dialog.html`'s Approve/Reject and `_operator_list.html`'s
+  Cancel, bypassing `hx-vals` so a dismissed `prompt()` can abort the
+  request instead of submitting an empty comment). All requests now go
+  through `fetch()` instead of `XMLHttpRequest`; harmless here since no
+  backend route inspects `HX-*` request headers. Tailwind v4 renamed
+  the unsuffixed tier of a few scales (`shadow`→`shadow-sm`, old
+  `shadow-sm`→`shadow-xs`, same pattern for `rounded`/`blur`) and
+  changed the default `border` color from `gray-200` to `currentColor`.
+  This codebase only uses suffixed variants (`rounded-md`, `rounded-xl`,
+  etc.) and always pairs `border`/`border-b` with an explicit color
+  class, so it isn't affected today, but a future utility-class addition
+  could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
+  no suffix before assuming it's still safe.
 - **`bff/schemas.py`** — registry of Pydantic models keyed by
   `review_type`. Adding a review type touches two files: a model +
   registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`
