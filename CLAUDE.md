@@ -157,6 +157,22 @@ Dependencies are declared once, in `pyproject.toml`'s `dependencies` list.
   class, so it isn't affected today, but a future utility-class addition
   could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
   no suffix before assuming it's still safe.
+  The Create/Save form's loading indicator (`operator.html`'s
+  `#page-spinner`, wired via `_form_dialog.html`'s
+  `hx-indicator="#page-spinner"` and `hx-swap="outerHTML swap:800ms"`)
+  deliberately lives in `operator.html`'s persistent header, **not**
+  inside the dialog or inside `#request-list` — both of those get
+  destroyed/replaced as part of a successful submit, so an indicator
+  nested in either only has a window to be seen for as long as content
+  survives, which combined with how fast a local Create actually
+  completes can be effectively zero. The dialog itself closes
+  immediately (its `hx-swap-oob="true"` div has no delay); only the
+  main list swap carries the `swap:800ms` modifier — this is
+  intentional, not an inconsistency: it lets the dialog close right
+  away while the persistent-page spinner keeps spinning until the
+  (now visually decoupled) list actually updates. See the `htmx4`
+  skill's "Loading indicators and swap timing" section for the general
+  pattern and the OOB-swap-timing gotcha this depends on.
 - **`bff/schemas.py`** — registry of Pydantic models keyed by
   `review_type`. Adding a review type touches two files: a model +
   registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`

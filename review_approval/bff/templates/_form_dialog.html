@@ -6,7 +6,7 @@
     {% endif %}
     <form
       hx-post="{{ '/ui/operator/requests' if mode == 'create' else '/ui/operator/' ~ request_id ~ '/update' }}"
-      hx-target="#request-list" hx-swap="outerHTML">
+      hx-target="#request-list" hx-swap="outerHTML swap:800ms" hx-indicator="#page-spinner">
       <div class="mb-4">
         <label class="block text-xs font-semibold mb-1 text-gray-700">Review Type</label>
         {% if mode == "create" %}
