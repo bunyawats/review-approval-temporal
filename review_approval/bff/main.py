@@ -71,7 +71,7 @@ async def _redirect_to_login(request, exc):
 app.include_router(ui_router)
 
 
-@app.get("/")
+@app.get("/", tags=["Web UI"])
 async def root():
     return RedirectResponse(url="/ui/login")
 
@@ -86,7 +86,7 @@ class DecisionRequest(BaseModel):
     comment: str = ""
 
 
-@app.post("/reviews", status_code=201)
+@app.post("/reviews", status_code=201, tags=["REST Services"])
 async def create_review(
     request: Request,
     body: CreateReviewRequest,
@@ -105,7 +105,7 @@ async def create_review(
     return {"request_id": request_id, "status": "PENDING_REVIEW"}
 
 
-@app.get("/reviews/{request_id}")
+@app.get("/reviews/{request_id}", tags=["REST Services"])
 async def get_review(request_id: str, request: Request, user: dict = Depends(get_current_user)):
     record = await service.get_review(request.app.state.pg_pool, request_id)
     if record is None:
@@ -113,7 +113,7 @@ async def get_review(request_id: str, request: Request, user: dict = Depends(get
     return record
 
 
-@app.patch("/reviews/{request_id}")
+@app.patch("/reviews/{request_id}", tags=["REST Services"])
 async def update_review(
     request_id: str,
     body: CreateReviewRequest,
@@ -141,7 +141,7 @@ class CancelRequest(BaseModel):
     comment: str = ""
 
 
-@app.post("/reviews/{request_id}/cancel")
+@app.post("/reviews/{request_id}/cancel", tags=["REST Services"])
 async def cancel_review(
     request_id: str,
     request: Request,
@@ -166,7 +166,7 @@ async def cancel_review(
     return {"status": "cancel_sent"}
 
 
-@app.post("/reviews/{request_id}/decision")
+@app.post("/reviews/{request_id}/decision", tags=["REST Services"])
 async def submit_decision(
     request_id: str,
     body: DecisionRequest,
@@ -189,6 +189,6 @@ async def submit_decision(
     return {"status": "signal_sent"}
 
 
-@app.get("/reviews")
+@app.get("/reviews", tags=["REST Services"])
 async def list_reviews(request: Request, user: dict = Depends(get_current_user)):
     return await service.list_reviews(request.app.state.pg_pool)

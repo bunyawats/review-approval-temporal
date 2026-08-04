@@ -19,7 +19,7 @@ from review_approval.bff import service
 from review_approval.bff.mock_auth import login, logout, require_session_role
 from review_approval.bff.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
-router = APIRouter(prefix="/ui")
+router = APIRouter(prefix="/ui", tags=["Web UI"])
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
