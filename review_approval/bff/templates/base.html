@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review / Approval POC</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-slate-800 min-h-screen">
+  {% if user %}
+  <header class="bg-white border-b border-gray-200 px-6 py-3.5 flex justify-between items-center">
+    <div class="font-semibold">Review / Approval POC &middot; <span class="text-gray-500 font-normal">{{ user.role|capitalize }}</span></div>
+    <div class="flex items-center gap-3">
+      <span class="text-gray-500 text-sm">{{ user.username }}</span>
+      <form method="post" action="/ui/logout">
+        <button class="px-2.5 py-1 text-xs font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300" type="submit">Log out</button>
+      </form>
+    </div>
+  </header>
+  {% endif %}
+  <main class="max-w-4xl mx-auto my-8 px-4">
+    {% block content %}{% endblock %}
+  </main>
+  <div id="dialog-container"></div>
+</body>
+</html>

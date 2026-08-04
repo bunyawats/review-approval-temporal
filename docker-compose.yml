@@ -1,0 +1,117 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      # This is Temporal's own default database. Our app gets a SEPARATE
+      # database (review_approval), created by db/init/01-*.sh below --
+      # the two never share a schema namespace.
+      POSTGRES_DB: temporal
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/schema.sql:/schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8233:8080"
+
+  # Split into two roles on the SAME task queues -- see worker.py's
+  # docstring. REVIEW_TYPE is deliberately left UNSET here, so each of
+  # these two services polls EVERY known review type's queue -- keeps
+  # local dev simple (no per-type service per review type). Scale the two
+  # roles independently:
+  #   docker compose up --scale worker-workflow=3 --scale worker-activity=2
+  #
+  # To scale ONE review type's worker capacity independently of the
+  # others (the actual point of per-type task queues), add REVIEW_TYPE to
+  # a service, e.g.:
+  #
+  #   worker-activity-purchase-order:
+  #     build: .
+  #     command: python -m review_approval.worker
+  #     environment:
+  #       WORKER_MODE: activity
+  #       REVIEW_TYPE: purchase_order
+  #       DATABASE_URL: postgresql://temporal:temporal@postgres:5432/review_approval
+  #       TEMPORAL_HOST: temporal:7233
+  #
+  # ...then scale just that service. This is the pattern Kubernetes
+  # Deployments should use in production -- see CLAUDE.md's Kubernetes
+  # section.
+  worker-workflow:
+    build: .
+    command: python -m review_approval.worker
+    depends_on:
+      - temporal
+    environment:
+      WORKER_MODE: workflow
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      # No DATABASE_URL here on purpose -- workflow code is pure/
+      # deterministic and never touches Postgres, so this service runs
+      # with zero DB credentials.
+    restart: on-failure
+
+  worker-activity:
+    build: .
+    command: python -m review_approval.worker
+    depends_on:
+      - temporal
+      - postgres
+    environment:
+      WORKER_MODE: activity
+      DATABASE_URL: postgresql://temporal:temporal@postgres:5432/review_approval
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+    restart: on-failure
+
+  bff:
+    build: .
+    command: uvicorn review_approval.bff.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - temporal
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://temporal:temporal@postgres:5432/review_approval
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      # Intentionally left unset for now -- the JSON API's Keycloak-
+      # protected routes will 503 if called, but /ui/* (mock auth) works
+      # fine without it. Set this once Keycloak is actually stood up.
+      # KEYCLOAK_ISSUER: http://keycloak:8080/realms/myrealm
+      UI_SESSION_SECRET: local-compose-dev-secret
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+volumes:
+  pg_data:

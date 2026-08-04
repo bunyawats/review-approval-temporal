@@ -1,0 +1,39 @@
+<div class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">{{ "New Review Request" if mode == "create" else "Edit Review Request" }}</h2>
+    {% if error %}
+    <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
+    {% endif %}
+    <form
+      hx-post="{{ '/ui/operator/requests' if mode == 'create' else '/ui/operator/' ~ request_id ~ '/update' }}"
+      hx-target="#request-list" hx-swap="outerHTML">
+      <div class="mb-4">
+        <label class="block text-xs font-semibold mb-1 text-gray-700">Review Type</label>
+        {% if mode == "create" %}
+        <select name="review_type" required class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm">
+          {% for rt in review_types %}
+          <option value="{{ rt }}" {% if rt == review_type %}selected{% endif %}>{{ rt }}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <input type="text" value="{{ review_type }}" disabled
+          class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm bg-gray-50 text-gray-500">
+        {% endif %}
+      </div>
+      <div class="mb-4">
+        <label class="block text-xs font-semibold mb-1 text-gray-700">Payload (JSON)</label>
+        <textarea name="payload_json" required
+          class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm font-mono min-h-[160px]">{{ payload_json or "{}" }}</textarea>
+      </div>
+      <div class="flex justify-end gap-2 mt-5">
+        <button type="button"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+          onclick="document.getElementById('dialog-container').innerHTML=''">Cancel</button>
+        <button type="submit"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
+          {{ "Create" if mode == "create" else "Save" }}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

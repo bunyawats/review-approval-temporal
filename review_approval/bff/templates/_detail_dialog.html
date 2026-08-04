@@ -1,0 +1,69 @@
+{% set badge_classes = {
+  "pending_review": "bg-amber-100 text-amber-800",
+  "approved": "bg-green-100 text-green-800",
+  "rejected": "bg-red-100 text-red-800",
+  "cancelled": "bg-gray-200 text-gray-700",
+} %}
+<div class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">Request Detail</h2>
+    {% if error %}
+    <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
+    {% endif %}
+
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Type</label>
+      <div class="text-sm py-0.5">{{ record.review_type }}</div>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Requester</label>
+      <div class="text-sm py-0.5">{{ record.requester }}</div>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Status</label>
+      <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(record.status|lower, 'bg-gray-200 text-gray-700') }}">
+        {{ record.status|replace("_", " ") }}
+      </span>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Payload</label>
+      <pre class="bg-slate-50 border border-gray-200 rounded-md p-3 text-sm overflow-x-auto m-0">{{ record.payload | tojson(indent=2) }}</pre>
+    </div>
+
+    {% if record.status != "PENDING_REVIEW" %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Closed by</label>
+      <div class="text-sm py-0.5">{{ record.closed_by or "\u2014" }}</div>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment</label>
+      <div class="text-sm py-0.5">{{ record.closed_comment or "\u2014" }}</div>
+    </div>
+    {% endif %}
+
+    {% if role == "manager" and record.status == "PENDING_REVIEW" %}
+    <form hx-post="/ui/manager/{{ record.id }}/decision" hx-target="#request-list" hx-swap="outerHTML">
+      <div class="mb-4">
+        <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional)</label>
+        <input type="text" name="comment" placeholder="Add a note..."
+          class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm">
+      </div>
+      <div class="flex justify-end gap-2 mt-5">
+        <button type="button"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+          onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+        <button type="submit" name="decision" value="REJECTED"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700">Reject</button>
+        <button type="submit" name="decision" value="APPROVED"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700">Approve</button>
+      </div>
+    </form>
+    {% else %}
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+    </div>
+    {% endif %}
+  </div>
+</div>

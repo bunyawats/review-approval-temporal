@@ -1,0 +1,268 @@
+# CLAUDE.md
+
+Context for Claude Code working in this repo.
+
+## What this is
+
+A Review/Approval workflow system built on Temporal (Python SDK), with a
+FastAPI BFF in front of it, PostgreSQL for queryable persistence, and
+Keycloak for auth. Two roles: **Operator** (creates review requests),
+**Manager** (approves/rejects them). Requests can also be edited or
+cancelled by their own requester while still pending.
+
+## Project structure
+
+```
+review-approval/
+├── pyproject.toml           # single source of truth for deps + packaging
+├── Dockerfile
+├── docker-compose.yml
+├── db/{schema.sql, init/}   # NOT part of the Python package -- consumed
+│                             # directly by the postgres container via
+│                             # bind mount, never imported by app code
+└── review_approval/
+    ├── __init__.py
+    ├── workflows.py
+    ├── activities.py
+    ├── worker.py
+    ├── task_queues.py
+    └── bff/
+        ├── __init__.py
+        ├── main.py / ui.py / auth.py / mock_auth.py / schemas.py / service.py
+        └── templates/*.html
+```
+
+Every module imports every other module by its full package path —
+`from review_approval.workflows import ...`,
+`from review_approval.bff import service`, etc. No `sys.path`
+manipulation anywhere. New top-level modules go inside `review_approval/`.
+
+Entrypoints (work from any directory once the package is installed):
+- `python -m review_approval.worker`
+- `uvicorn review_approval.bff.main:app`
+
+Dependencies are declared once, in `pyproject.toml`'s `dependencies` list.
+
+## Architecture (do not violate these boundaries)
+
+- **`workflows.py`** — `ReviewApprovalWorkflow`. Must stay
+  **payload-agnostic**: it only ever sees `review_type: str` and
+  `payload: dict[str, Any]`, and never inspects the dict's contents. All
+  payload-shape validation belongs in `bff/schemas.py`. Terminal states
+  are `APPROVED`, `REJECTED`, `CANCELLED`, reached via the
+  `submit_decision` and `cancel_request` signals; `_is_final()` guards
+  every signal handler against acting twice. `update_payload` is only
+  valid pre-decision.
+- **`activities.py`** — the *only* file allowed to talk to Postgres.
+  Workflow code never calls asyncpg directly; it goes through
+  `workflow.execute_activity`. One activity per state-changing operation
+  (`persist_request`, `persist_decision`, `persist_update`,
+  `persist_cancel`) — don't collapse these into a single generic
+  activity, since each has different column-update semantics.
+- **`worker.py`** — long-running process that executes workflow/activity
+  code, separate from the BFF. Any new activity must be registered in
+  both `workflows.py`'s `imports_passed_through` block and `worker.py`'s
+  activity list. Two independent env vars control it:
+  - **`WORKER_MODE`** (`both` / `workflow` / `activity`, default `both`)
+    — which half of the work this process registers. `workflow` mode
+    never touches Postgres and needs no `DATABASE_URL`.
+  - **`REVIEW_TYPE`** (unset, or one of `KNOWN_REVIEW_TYPES`) — which
+    review-type-specific task queue(s) this process polls. Unset polls
+    every known type (one `Worker` per type, concurrently, in this one
+    process). Set polls only that type's queue — the mechanism for
+    scaling one review type's worker capacity independently of others.
+  Both axes compose freely and neither should be removed — Compose and
+  the Kubernetes topology both depend on them.
+- **`task_queues.py`** — single source of truth for `KNOWN_REVIEW_TYPES`
+  and the task-queue naming scheme (`task_queue_for_review_type()`).
+  Every review type gets its own Temporal task queue. This file has
+  **zero dependency on `bff/`** — `worker.py` imports it directly.
+  `bff/schemas.py` importing *from* here is fine (the established
+  `bff`-depends-on-core direction); the reverse must never happen.
+- **`bff/service.py`** — the *only* place that calls the Temporal client
+  or reads/writes review data on behalf of a router. Both `bff/main.py`
+  (JSON API) and `bff/ui.py` (HTMX UI) call into this module rather than
+  duplicating business logic (ownership checks, status checks, payload
+  validation). Add new capabilities here first, then expose from both
+  routers.
+- **`bff/main.py`** — the JSON REST surface, real Keycloak auth. Thin:
+  each route extracts params, calls `service.py`, maps exceptions to HTTP
+  status codes.
+- **`bff/auth.py`** — Keycloak JWT validation + role-check dependency
+  (`require_role("operator")` / `require_role("manager")`) for the JSON
+  API. Temporal has zero concept of roles — the BFF is the sole
+  enforcement point. `KEYCLOAK_ISSUER` is read lazily, on first actual
+  call to a protected route, not at import time, so the app (including
+  `/ui/*`) runs fully without Keycloak configured at all.
+- **`bff/mock_auth.py`** — session-cookie auth for the **POC UI only**
+  (`bff/ui.py`). No password, no identity check — trusts whatever role
+  the login form submitted. Never use for the JSON API. Swap-out path to
+  real auth: replace what `login()` trusts with a Keycloak Authorization
+  Code flow; keep storing `{"username", "role"}` in the session so
+  `ui.py` doesn't need to change.
+- **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
+  `/ui/operator`, `/ui/manager`). Every route calls `bff/service.py`,
+  never Temporal/Postgres directly. Dialogs are HTML fragments swapped
+  into `#dialog-container`; list refreshes use an out-of-band swap
+  (`hx-swap-oob`) to close the dialog after a successful mutation — see
+  the `clear_dialog` flag in `_operator_list.html`/`_manager_list.html`.
+- **`bff/templates/`** — Jinja2 templates. `base.html` is the shell;
+  `_*.html` are HTMX fragments, not full pages. This project's Starlette
+  version requires **`TemplateResponse(request, name, context)`**
+  (request first) — the older `TemplateResponse(name, {"request": ...})`
+  form breaks here. Styling is Tailwind via the CDN script in
+  `base.html` — no custom `<style>` blocks, no custom CSS classes; use
+  Tailwind utility classes directly. Status-badge colors are a Jinja
+  dict literal (`badge_classes`) **duplicated in three templates**
+  (`_operator_list.html`, `_manager_list.html`, `_detail_dialog.html`) —
+  a new status value needs all three updated. Templates ship as package
+  data (`pyproject.toml`'s `[tool.setuptools.package-data]`); new
+  `.html` files need no config change, other asset types would.
+- **`bff/schemas.py`** — registry of Pydantic models keyed by
+  `review_type`. Adding a review type touches two files: a model +
+  registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`
+  in `task_queues.py`. An `assert` at the bottom of this file checks the
+  two stay in sync and fails loudly at import time if not — don't remove
+  it.
+- **`db/schema.sql`** — Postgres is the queryable/audit record; the JSON
+  API's `GET /reviews` and the UI's list screens read from it directly
+  (reads only — writes always go through a workflow signal/activity).
+  Temporal is the source of truth for *live* workflow state. Not part of
+  the `review_approval` Python package and never copied into the app's
+  Docker image — only the `postgres` service in `docker-compose.yml`
+  reads it, via bind mount.
+
+## Invariants (not obvious from code alone — do not regress these)
+
+- **Visibility**: Operators see only requests where
+  `requester == their username`. Managers see *all* requests. Enforced
+  by whether `service.list_reviews()` is called with a `requester`
+  filter (operator routes) or without one (manager routes, JSON API's
+  `GET /reviews`) — no separate permission check exists beyond that.
+- **Terminal states are view-only, for both roles, no exceptions.** Once
+  `APPROVED`/`REJECTED`/`CANCELLED`, nobody can edit, cancel, or
+  re-decide — not the requester, not any manager.
+  `update_review`/`cancel_review`/`submit_decision` in `service.py` all
+  enforce this via `status != "PENDING_REVIEW"`; the UI mirrors it by
+  only rendering action buttons on `PENDING_REVIEW` rows/dialogs. A new
+  mutation needs the same guard in `service.py` — don't rely on the UI
+  alone, since the JSON API is a second front door.
+- **`review_type` is immutable after creation.** Only `payload` can be
+  edited. The edit form disables the review-type `<input>` for this
+  reason.
+- **`closed_status`/`closed_by`/`closed_comment`/`closed_at` are shared
+  across all three terminal outcomes** (`APPROVED`, `REJECTED`,
+  `CANCELLED`) — not decision-specific. A cancellation populates all
+  four the same as a decision does, just with the requester as the actor
+  and `CANCELLED` as the status. `cancel_request`'s signal signature is
+  `(self, cancelled_by: str, comment: str = "")`. A fourth terminal
+  outcome, if ever added, should reuse these same four columns.
+- Workflow ↔ activity data crosses via `@dataclass`, not raw dicts/tuples
+  (see `PersistRequestInput`, `ReviewStatus`, etc.) — keep this pattern
+  for any new activities.
+- Workflow IDs are always `f"review-{request_id}"` (see `workflow_id()`
+  in `bff/service.py`). Don't introduce a second ID scheme.
+- All four signals (`submit_decision`, `update_payload`,
+  `cancel_request`) are idempotent/final-state-safe via the shared
+  `_is_final()` guard.
+- All activity calls use `start_to_close_timeout` + `RetryPolicy`.
+- Ownership/status checks live in `bff/service.py`, not in either
+  router. Both `main.py` and `ui.py` translate the same `LookupError` /
+  `PermissionError` / `ValueError` exceptions from `service.py` into
+  their own response format (HTTP status codes vs. re-rendered dialog
+  fragments).
+
+## Local dev: Docker Compose
+
+`docker-compose.yml` + `Dockerfile` + `db/init/*.sh` are for **local dev
+only** — not a preview of the Kubernetes shape below.
+
+- One `Dockerfile`, shared by `bff`, `worker-workflow`, and
+  `worker-activity` — same image (`pip install .` from `pyproject.toml`),
+  different `command:`/`environment:` per service.
+- `worker-workflow` and `worker-activity` are the same
+  `python -m review_approval.worker`, split via `WORKER_MODE`. Both
+  leave `REVIEW_TYPE` unset, so each polls every known review type's
+  queue — keeps Compose simple rather than needing one service per
+  review type. This split is for scaling/security isolation, not HA — HA
+  comes from replica count
+  (`docker compose up --scale worker-activity=3`).
+- One Postgres container hosts **two databases**: `temporal` (created
+  automatically by the `temporalio/auto-setup` image) and
+  `review_approval` (this app's data, created + schema-applied by
+  `db/init/01-create-app-database.sh` and `02-apply-app-schema.sh` on
+  first container start). Editing `db/schema.sql` doesn't affect existing
+  containers — `docker compose down -v` to drop the volume and re-run
+  init scripts.
+- `KEYCLOAK_ISSUER` is deliberately unset in `docker-compose.yml` — the
+  JSON API's protected routes 503 if called, `/ui/*` works fully without
+  it. Don't add a Keycloak service without checking with the user first.
+
+## Deployment target: Kubernetes
+
+- **Deployments**: `bff` (serves *both* the JSON API and `/ui/*` — not
+  split into separate services) plus worker Deployments. Worker
+  Deployments have two independent scaling axes, both via env vars on the
+  same image/entrypoint:
+  - `WORKER_MODE` (`workflow` / `activity`) — split by role.
+  - `REVIEW_TYPE` (e.g. `purchase_order`) — split by review type, so a
+    high-volume or slow-activity type can get its own Deployment and
+    replica count without competing with others for the same worker
+    pool.
+  These compose freely, e.g. `worker-activity-purchase-order` (3
+  replicas) next to `worker-activity-leave-request` (1 replica). For a
+  small deployment, one `worker` Deployment with neither env var set
+  (serves all types, both roles) is fine. All worker Deployments are
+  stateless and horizontally scalable — HA comes from replica count, not
+  from either split.
+- **Every review type in `KNOWN_REVIEW_TYPES` needs at least one worker
+  Deployment actually polling its queue** (`REVIEW_TYPE=<that type>`, or
+  a catch-all with `REVIEW_TYPE` unset) — a workflow started on a queue
+  nobody polls sits at `PENDING_REVIEW` forever with no error anywhere.
+  There's no automated check for this.
+- `TEMPORAL_HOST` must point at the in-cluster Temporal Service, not the
+  `localhost:7233` default.
+- `UI_SESSION_SECRET` **must** be a Kubernetes Secret shared across all
+  `bff` replicas — the code's fallback value only works for a single
+  local process.
+- Postgres `max_connections` needs to account for `asyncpg` pool
+  `max_size` × pod replica count across all Deployments running in
+  `activity` or `both` mode (workflow-only Deployments never touch
+  Postgres).
+- The same `Dockerfile` used for Compose works as the K8s manifest base —
+  no Compose-specific assumptions baked in.
+
+## Known gaps
+
+- No timeout on "wait for Manager decision" — requests can wait forever.
+- No notification activity (email/Slack) on request creation or decision.
+- `verify_aud=False` in `bff/auth.py` — needs a real audience once the
+  Keycloak client is finalized.
+- No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
+  polling its queue.
+- `bff/mock_auth.py` / `/ui/*` have no real authentication — see its
+  docstring before extending or deploying it anywhere shared.
+- No test suite yet.
+
+## Running locally
+
+Preferred: `docker compose up --build` (see README.md's Setup section) —
+no env vars needed, `docker-compose.yml` sets them all.
+
+Native alternative:
+
+```bash
+temporal server start-dev                                   # separate terminal
+python -m review_approval.worker                             # separate terminal
+uvicorn review_approval.bff.main:app --reload --port 8000    # separate terminal
+```
+
+Requires `pip install -e .` first, and `DATABASE_URL` set (plus
+`KEYCLOAK_ISSUER` only if calling the JSON API) — see `.env.example`.
+
+## Testing changes
+
+There's no test suite yet. When adding one, prefer Temporal's
+`temporalio.testing.WorkflowEnvironment` (time-skipping test environment)
+for workflow/activity tests over hitting a real Temporal server. Tests go
+under a new `tests/` directory at the repo root, not inside the package.

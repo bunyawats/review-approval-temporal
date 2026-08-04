@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex justify-between items-center mb-4">
+  <h1 class="text-xl font-semibold m-0">My Review Requests</h1>
+  <button
+    class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700"
+    hx-get="/ui/operator/new-form" hx-target="#dialog-container" hx-swap="innerHTML">
+    + New Request
+  </button>
+</div>
+{% include "_operator_list.html" %}
+{% endblock %}
