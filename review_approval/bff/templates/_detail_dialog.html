@@ -42,22 +42,17 @@
     {% endif %}
 
     {% if role == "manager" and record.status == "PENDING_REVIEW" %}
-    <form hx-post="/ui/manager/{{ record.id }}/decision" hx-target="#request-list" hx-swap="outerHTML">
-      <div class="mb-4">
-        <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional)</label>
-        <input type="text" name="comment" placeholder="Add a note..."
-          class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm">
-      </div>
-      <div class="flex justify-end gap-2 mt-5">
-        <button type="button"
-          class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
-          onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
-        <button type="submit" name="decision" value="REJECTED"
-          class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700">Reject</button>
-        <button type="submit" name="decision" value="APPROVED"
-          class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700">Approve</button>
-      </div>
-    </form>
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
+        onclick="var c = prompt('Optional note for rejecting this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {target: '#request-list', swap: 'outerHTML', values: {decision: 'REJECTED', comment: c}})">Reject</button>
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
+        onclick="var c = prompt('Optional note for approving this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {target: '#request-list', swap: 'outerHTML', values: {decision: 'APPROVED', comment: c}})">Approve</button>
+    </div>
     {% else %}
     <div class="flex justify-end gap-2 mt-5">
       <button type="button"

@@ -13,6 +13,7 @@ package):
     uvicorn review_approval.bff.main:app --reload --port 8000
 """
 
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -30,13 +31,24 @@ from review_approval.bff.mock_auth import RequireLoginRedirect
 from review_approval.bff.ui import router as ui_router
 
 
+async def _register_jsonb_codec(conn: asyncpg.Connection) -> None:
+    # asyncpg returns json/jsonb columns as raw text by default -- without
+    # this, review_requests.payload comes back as a JSON *string* everywhere
+    # it's read (list_reviews, get_review), not a dict.
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.temporal_client = await Client.connect(
         os.environ.get("TEMPORAL_HOST", "localhost:7233"),
         namespace=os.environ.get("TEMPORAL_NAMESPACE", "default"),
     )
-    app.state.pg_pool = await asyncpg.create_pool(dsn=os.environ["DATABASE_URL"])
+    app.state.pg_pool = await asyncpg.create_pool(
+        dsn=os.environ["DATABASE_URL"], init=_register_jsonb_codec
+    )
     yield
     await app.state.pg_pool.close()
 

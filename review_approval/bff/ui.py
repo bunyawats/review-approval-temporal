@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from review_approval.bff import service
 from review_approval.bff.mock_auth import login, logout, require_session_role
-from review_approval.bff.schemas import REVIEW_TYPE_SCHEMAS
+from review_approval.bff.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
 router = APIRouter(prefix="/ui")
 templates = Jinja2Templates(
@@ -83,7 +83,11 @@ async def new_form(request: Request, user: dict = Depends(require_session_role("
     return _render(
         request,
         "_form_dialog.html",
-        {"mode": "create", "review_types": list(REVIEW_TYPE_SCHEMAS)},
+        {
+            "mode": "create",
+            "review_types": list(REVIEW_TYPE_SCHEMAS),
+            "sample_payloads": SAMPLE_PAYLOADS,
+        },
     )
 
 

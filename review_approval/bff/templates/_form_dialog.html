@@ -10,7 +10,7 @@
       <div class="mb-4">
         <label class="block text-xs font-semibold mb-1 text-gray-700">Review Type</label>
         {% if mode == "create" %}
-        <select name="review_type" required class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm">
+        <select name="review_type" id="review-type-select" required class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm">
           {% for rt in review_types %}
           <option value="{{ rt }}" {% if rt == review_type %}selected{% endif %}>{{ rt }}</option>
           {% endfor %}
@@ -22,7 +22,7 @@
       </div>
       <div class="mb-4">
         <label class="block text-xs font-semibold mb-1 text-gray-700">Payload (JSON)</label>
-        <textarea name="payload_json" required
+        <textarea name="payload_json" id="payload-textarea" required
           class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm font-mono min-h-[160px]">{{ payload_json or "{}" }}</textarea>
       </div>
       <div class="flex justify-end gap-2 mt-5">
@@ -35,5 +35,20 @@
         </button>
       </div>
     </form>
+    {% if sample_payloads %}
+    <script>
+      (function () {
+        var samples = {{ sample_payloads | tojson }};
+        var select = document.getElementById("review-type-select");
+        var textarea = document.getElementById("payload-textarea");
+        function fillSample() {
+          var sample = samples[select.value];
+          if (sample) textarea.value = JSON.stringify(sample, null, 2);
+        }
+        select.addEventListener("change", fillSample);
+        fillSample();
+      })();
+    </script>
+    {% endif %}
   </div>
 </div>

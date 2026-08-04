@@ -2,11 +2,13 @@
 Registry of payload schemas per review_type.
 
 Adding a new review type touches TWO places, not one:
-  1. This file -- add a Pydantic model and a REVIEW_TYPE_SCHEMAS entry.
+  1. This file -- add a Pydantic model, a REVIEW_TYPE_SCHEMAS entry, and a
+     SAMPLE_PAYLOADS entry (used to auto-populate the "New Request" form).
   2. review_approval/task_queues.py -- add the type string to
      KNOWN_REVIEW_TYPES.
-The assertion below fails loudly at import time if these two drift apart,
-rather than silently starting workflows on a task queue nothing polls.
+The assertions below fail loudly at import time if these drift apart,
+rather than silently starting workflows on a task queue nothing polls, or
+serving a mockup dialog with no sample for a given type.
 """
 
 from typing import Any
@@ -38,6 +40,29 @@ REVIEW_TYPE_SCHEMAS: dict[str, type[BaseModel]] = {
 
 assert set(REVIEW_TYPE_SCHEMAS) == set(KNOWN_REVIEW_TYPES), (
     f"REVIEW_TYPE_SCHEMAS {set(REVIEW_TYPE_SCHEMAS)} and KNOWN_REVIEW_TYPES "
+    f"{set(KNOWN_REVIEW_TYPES)} have drifted apart -- update both when "
+    f"adding or removing a review type."
+)
+
+# One realistic example payload per review_type, used only to pre-fill the
+# "New Request" dialog's textarea -- never validated or persisted as-is.
+SAMPLE_PAYLOADS: dict[str, dict[str, Any]] = {
+    "purchase_order": {
+        "vendor": "Acme Corp",
+        "amount": 1500.00,
+        "currency": "USD",
+        "line_items": ["widgets", "gadgets"],
+    },
+    "leave_request": {
+        "employee": "Jane Doe",
+        "start_date": "2026-08-10",
+        "end_date": "2026-08-14",
+        "reason": "Family vacation",
+    },
+}
+
+assert set(SAMPLE_PAYLOADS) == set(KNOWN_REVIEW_TYPES), (
+    f"SAMPLE_PAYLOADS {set(SAMPLE_PAYLOADS)} and KNOWN_REVIEW_TYPES "
     f"{set(KNOWN_REVIEW_TYPES)} have drifted apart -- update both when "
     f"adding or removing a review type."
 )
