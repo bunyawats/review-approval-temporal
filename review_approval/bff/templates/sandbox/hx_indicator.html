@@ -79,7 +79,25 @@
   </section>
 
   <section>
-    <h2 class="font-semibold mb-1">5. Live htmx.config sanity check</h2>
+    <h2 class="font-semibold mb-1">5. Exact Cancel-button structure: confirm() + prompt() + imperative htmx.ajax()</h2>
+    <p class="text-gray-500 text-sm mb-2">
+      Fast endpoint (0ms sleep) + swap:800ms, but fired imperatively from a bare button's
+      onclick, gated behind confirm() and prompt() first -- the exact pattern the real app's
+      Cancel/Approve/Reject buttons use, unlike cases 1-4 above which all use declarative
+      hx-post with no blocking dialogs in the way. Isolates whether confirm()/prompt() before
+      htmx.ajax() is what's different.
+    </p>
+    <button id="case5-btn" class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
+      hx-indicator="#spinner5"
+      onclick="if (!confirm('Proceed?')) return; var c = prompt('Optional note:'); if (c === null) return; htmx.ajax('POST', '/sandbox/hx-indicator/case5-action', {source: this, target: '#result5', swap: 'outerHTML swap:800ms', values: {note: c}})">
+      <span id="spinner5" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+      Cancel-style action
+    </button>
+    <div id="result5" class="text-sm text-gray-600 mt-2">(no result yet)</div>
+  </section>
+
+  <section>
+    <h2 class="font-semibold mb-1">6. Live htmx.config sanity check</h2>
     <pre id="config-check" class="bg-gray-50 border border-gray-200 rounded-md p-3 text-xs">(populating...)</pre>
     <script>
       document.getElementById("config-check").textContent = JSON.stringify({

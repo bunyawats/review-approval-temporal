@@ -159,22 +159,60 @@ or `bff/` respectively; don't put front-door-specific logic in
 - **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
   `/ui/operator`, `/ui/manager`). Every route calls `workflow/service.py`,
   never Temporal/Postgres directly. Dialogs are HTML fragments swapped
-  into `#dialog-container`; list refreshes use an out-of-band swap
-  (`hx-swap-oob`) to close the dialog after a successful mutation — see
-  the `clear_dialog` flag in `_operator_list.html`/`_manager_list.html`.
-  Save/Cancel/Approve/Reject target **just their own row**
-  (`#row-{request_id}`), not the whole `#request-list` — see
-  `_operator_row.html`/`_manager_row.html` below. Every mutating route's
-  *error* path still needs to land back in the dialog though, which no
-  longer matches that row-scoped `hx-target` — those responses carry
-  `_RETARGET_DIALOG_HEADERS` (`HX-Retarget: #dialog-container`,
-  `HX-Reswap: innerHTML`), htmx's per-response override for exactly this
-  case (confirmed present in the real v4 beta bundle, not just docs).
-  Forgetting this on a new error branch means the error fragment tries
-  to swap into a single `<tr>`, which is exactly the latent bug this
-  pattern replaced — `create_request`'s two error branches had it
-  (pre-existing, predates the row-targeting work, caught and fixed
-  alongside it).
+  into `#dialog-container` (`_form_dialog.html` for Create/Edit,
+  `_cancel_dialog.html` for Cancel, `_detail_dialog.html` for
+  View/Review/Approve/Reject).
+  **Every mutating action (Save, Cancel, Approve, Reject) follows the
+  same confirm-dialog → close-immediately → spin-on-row-button
+  sequence.** Opening the dialog (Edit/Cancel/Review buttons, plain
+  `hx-get` into `#dialog-container`) is meant to feel instant — no
+  artificial delay on that GET. The dialog's confirm button (Save /
+  Confirm Cancel / Approve / Reject) is `type="button"`, not a form
+  submit: its `onclick` reads whatever it needs from the dialog's own
+  inputs into JS variables *first*, then clears `#dialog-container`'s
+  `innerHTML` (closing the dialog client-side, before the request is even
+  sent), then fires the actual mutation via `htmx.ajax()` — with `source`
+  pointing at the **row's own stable-id action button**
+  (`edit-btn-{request_id}`, `cancel-btn-{request_id}`,
+  `review-btn-{request_id}`, each carrying its own `hx-indicator` span),
+  not `this`, since the dialog element that would otherwise be `this` no
+  longer exists by the time the response comes back. `target` is
+  `#row-{request_id}`; `select: 'tr'` is required (see the
+  `_operator_row_response.html`/`_manager_row_response.html` bullet below
+  for why); `swap: 'outerHTML swap:400ms'` — the 400ms is a
+  **perceptibility floor, not a correctness mechanism**: `_wait_until()`
+  (below) already guarantees the response is the confirmed final state,
+  but a real local round trip can be as fast as 60-90ms, too fast for a
+  human to perceive the indicator's fade or its spin completing a visible
+  rotation at all (see the `htmx4` skill's "Making a real round trip
+  actually perceptible" section for the two independent CSS fixes this
+  needed beyond just the delay). Create is the one exception still using
+  a plain declarative form submit (`hx-post` on the `<form>` itself,
+  swapping the whole `#request-list`) because there's no existing row to
+  attach a `source` element to yet before the create succeeds; its
+  spinner is the "+ New Request" button itself, and that button needs an
+  *explicit* `hx-indicator="#create-spinner"` — omitting it means
+  `.htmx-request` lands on the button rather than the spinner span (htmx
+  falls back to the triggering element itself as the indicator when none
+  is given), which still shows the spinner via htmx's own descendant CSS
+  selector but silently skips the instant-show fix described below, since
+  that fix's selector requires `.htmx-request` on the *same* element as
+  the spinner.
+
+  Every mutating route's *error* path needs to land back in the dialog,
+  which no longer matches the row-scoped `target`/`source` those requests
+  were fired with — those responses carry `_RETARGET_DIALOG_HEADERS`
+  (`HX-Retarget: #dialog-container`, `HX-Reswap: innerHTML`, **and
+  `HX-Reselect: #dialog-root`**). The `HX-Reselect` is not optional: the
+  triggering action's `htmx.ajax()` call already set `select: 'tr'`, and
+  per the real v4 bundle that selection filter is still in effect for
+  *any* response to that request — including an error response, which
+  has no `<tr>` in it at all. Without `HX-Reselect` resetting the filter,
+  an error would silently render a blank dialog instead of the validation
+  message, rather than erroring loudly. `#dialog-root` is the id every
+  dialog fragment's own outer wrapper `<div>` carries, present in
+  `_form_dialog.html`, `_cancel_dialog.html`, and `_detail_dialog.html`
+  alike, specifically so this reselect target is stable across all three.
 - **`bff/templates/`** — Jinja2 templates. `base.html` is the shell;
   `_*.html` are HTMX fragments, not full pages. This project's Starlette
   version requires **`TemplateResponse(request, name, context)`**
@@ -214,10 +252,13 @@ or `bff/` respectively; don't put front-door-specific logic in
   swapped content) is now unconditional — so `_form_dialog.html`'s
   inline `<script>` (the sample-payload auto-fill) still works, now
   without an escape hatch to disable it. `htmx.ajax(method, url, ctx)`
-  keeps the same signature this codebase relies on (used directly in
-  `_detail_dialog.html`'s Approve/Reject and `_operator_list.html`'s
-  Cancel, bypassing `hx-vals` so a dismissed `prompt()` can abort the
-  request instead of submitting an empty comment). All requests now go
+  keeps the same signature this codebase relies on — used directly by
+  every dialog's confirm button (`_form_dialog.html`'s Save,
+  `_cancel_dialog.html`'s Confirm Cancel, `_detail_dialog.html`'s
+  Approve/Reject) for the close-dialog-then-fire-in-background pattern
+  described in the `bff/ui.py` bullet above, since a declarative
+  `hx-post` can't express "close this dialog and use a *different*
+  element as the request's source." All requests now go
   through `fetch()` instead of `XMLHttpRequest`; harmless here since no
   backend route inspects `HX-*` request headers. Tailwind v4 renamed
   the unsuffixed tier of a few scales (`shadow`→`shadow-sm`, old
@@ -228,76 +269,50 @@ or `bff/` respectively; don't put front-door-specific logic in
   class, so it isn't affected today, but a future utility-class addition
   could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
   no suffix before assuming it's still safe.
-  **Two loading-indicator patterns, by whether an existing row can be
-  targeted:**
-  - **Save/Cancel/Approve/Reject** (an existing row is being mutated) —
-    the spinner is embedded directly on the triggering button (matching
-    `/sandbox/hx-indicator/`'s case 3), `hx-indicator` points at that
-    spinner, and the request targets **`#row-{request_id}`** with plain
-    `hx-swap="outerHTML"` — **no artificial `swap:Nms` delay**. This
-    works because `workflow/service.py`'s `_wait_until()` (see that
-    section below) already blocks the HTTP response until the
-    `persist_*` activity has actually committed — the response *is* the
-    confirmed final state by the time it arrives, so there's nothing
-    left to fake with a delay, and the spinner can't disappear before
-    the row updates because they're the same swap. A dialog closes (via
-    its `hx-swap-oob="true"` div) in that *same* response, so dialog-
-    close and row-update aren't two events to synchronize, just one.
-  - **Create** (no row exists yet to target) — the only remaining
-    exception, still using the older whole-`#request-list`-swap pattern:
-    a persistent `#page-spinner` in `operator.html`'s header (outside
-    anything that gets swapped/destroyed) plus `hx-swap="outerHTML
-    swap:800ms"` on `_form_dialog.html`'s `<form>`, purely so the
-    (already-confirmed-correct, thanks to `_wait_until()`) response has
-    enough on-screen time to actually be perceived rather than flashing
-    by. If a future change gives Create somewhere to target before the
-    row exists (e.g. an optimistic placeholder row), drop this
-    exception and fold it into the row-targeted pattern above.
-
-  Every spinner (`#page-spinner`, and each per-button one) carries
-  Tailwind's `transition-opacity duration-200` **unconditionally**, not
-  gated behind `.htmx-request` — htmx's own injected CSS only animates
-  the *show* direction (`.htmx-request .htmx-indicator{opacity:1;
-  transition:opacity 200ms ease-in}`); the base `.htmx-indicator{opacity
-  :0}` hide rule has no transition at all, so without this addition a
-  spinner cuts off instantly rather than fading, which read as "it
-  vanished before the content caught up" even when the underlying
-  ordering was already correct — confirmed via a MutationObserver-
-  instrumented reproduction at `/sandbox/hx-indicator/timing` that logs
-  exact millisecond deltas instead of relying on how it looks. See the
-  `htmx4` skill's "Loading indicators and swap timing" section for the
-  general mechanism and the diagnostic-tooling lesson from building that
-  reproduction (don't split one click's side effects across an inline
-  `onclick=` and a separately-registered `addEventListener` when their
-  relative firing order matters for what you're measuring — inline
-  attribute handlers fire first).
-
-  **History of this pattern, since it went through several iterations
-  before landing here** (each already reverted, mentioned so the same
-  ideas aren't re-tried expecting a different result): (1) spinner
-  embedded on the Create button with the dialog staying open until the
-  row appeared, dialog-close OOB synced to the same `swap:800ms` as the
-  main target — reverted for a simpler, consistent-everywhere page-
-  spinner version; (2) that consistent version, applied to all five
-  actions uniformly via a whole-list `swap:800ms` — worked, but the
-  *real* root cause of "spinner disappears before the row updates" for
-  Save/Cancel/Approve/Reject turned out to be architectural, not
-  visual: `client.start_workflow()`/`handle.signal()` only confirm
-  Temporal *accepted* the operation, not that the `persist_*` activity
-  (run asynchronously by a worker process) had committed — so the old
-  whole-list swap could legitimately show pre-write data. Fixing that
-  (via `_wait_until()`) made the row-targeted pattern above both
-  possible and correct at the same time.
+  Every spinner carries Tailwind's `transition-opacity duration-200`
+  **unconditionally**, not gated behind `.htmx-request`, so the *hide*
+  direction fades instead of cutting off instantly (htmx's own injected
+  CSS only puts a `transition` on the active/show rule — see the `htmx4`
+  skill's base "Loading indicators and swap timing" section). Layered on
+  top of that, every spinner also carries
+  `[&.htmx-request]:!duration-0` — a same-element conditional override
+  that forces the *show* direction to be instant instead of taking the
+  full 200ms — and `[animation-duration:.3s]` alongside `animate-spin` to
+  speed up the rotation itself (Tailwind's default is 1000ms/turn, too
+  slow to read as motion in a sub-100ms window). See the `htmx4` skill's
+  "Making a real round trip actually perceptible" section for why both
+  of these are needed together, and its "Loading indicators: which
+  pattern to use, by whether a stable element exists" section for the
+  close-dialog-then-target-a-stable-row-button architecture this whole
+  bullet describes. `/sandbox/hx-indicator/` predates and proved out only
+  the *base* indicator mechanism (the four simpler cases there, plus the
+  MutationObserver timing harness at `/sandbox/hx-indicator/timing`) —
+  it hasn't been updated to demonstrate the instant-show/fast-spin/
+  close-dialog-first refinements layered on top since, so treat it as a
+  historical record of the mechanism, not a live mirror of the current
+  production pattern.
 - **`bff/templates/_operator_row.html`, `_manager_row.html`** — each
   defines one Jinja `{% macro %}` rendering a single `<tr id="row-
-  {request_id}">`. `_operator_list.html`/`_manager_list.html` `{% import
-  %}` and call the macro once per row in their loop; `_operator_row_
-  response.html`/`_manager_row_response.html` import and call the *same*
-  macro to render just one row (plus an OOB dialog-close div when
-  needed) for Save/Cancel/Approve/Reject's responses. One definition,
-  two call sites — the full-list and single-row renderings can never
-  drift apart on markup. Extending a row (new column, new action button)
-  means editing the macro once, not both list templates.
+  {request_id}">`, including that row's action button(s) with their
+  stable ids (`edit-btn-{id}`/`cancel-btn-{id}` for operator,
+  `review-btn-{id}` for manager) and embedded spinner spans.
+  `_operator_list.html`/`_manager_list.html` `{% import %}` and call the
+  macro once per row in their loop; `_operator_row_response.html`/
+  `_manager_row_response.html` import and call the *same* macro for
+  Save/Cancel/Approve/Reject's single-row responses. One definition, two
+  call sites — the full-list and single-row renderings can never drift
+  apart on markup. Extending a row (new column, new action button) means
+  editing the macro once, not both list templates.
+  **The single-row response templates wrap the macro's `<tr>` output in
+  a real `<table><tbody>...</tbody></table>`** — a bare `<tr>` outside
+  table context gets its own tags silently stripped by the browser's
+  HTML parser on swap, leaving its cell contents as loose children of
+  whatever `<tbody>` it lands in (see the `htmx4` skill's "Swapping
+  `<tr>`/`<td>` fragments outside a `<table>` context" section for the
+  full mechanism — this was a real, reproduced-and-fixed bug, not a
+  theoretical concern). The `select: 'tr'` on every caller's
+  `htmx.ajax()` (see the `bff/ui.py` bullet above) is what pulls the
+  correctly-parsed `<tr>` back out of that wrapper for the actual swap.
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
   away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
@@ -308,9 +323,11 @@ or `bff/` respectively; don't put front-door-specific logic in
   than a separately hardcoded version. Own `Jinja2Templates` instance
   (not reused from `ui.py`) under `templates/sandbox/`, tagged
   `"Sandbox"` in the OpenAPI docs. Currently has two experiments:
-  `hx-indicator` (`/sandbox/hx-indicator/`) — the four cases that
-  proved out the loading-indicator pattern documented above and in the
-  `htmx4` skill — and `hx-indicator/timing` (linked from that page) — a
+  `hx-indicator` (`/sandbox/hx-indicator/`) — several cases that proved
+  out the *base* `hx-indicator` mechanism (see the caveat on this in the
+  `bff/templates/` bullet above — it predates and doesn't demonstrate the
+  refinements layered on since) — and `hx-indicator/timing` (linked from
+  that page) — a
   MutationObserver-instrumented reproduction of the real app's exact
   self-polling-target + external-indicator + delayed-swap structure,
   logging millisecond-precision deltas into an on-page `<pre>` instead

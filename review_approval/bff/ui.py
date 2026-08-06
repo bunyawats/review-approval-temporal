@@ -46,7 +46,17 @@ def _render(
 # single row (HX-Retarget below) still need to land in the dialog instead --
 # these headers tell htmx to swap the re-rendered dialog fragment into
 # #dialog-container regardless of what hx-target the triggering element had.
-_RETARGET_DIALOG_HEADERS = {"HX-Retarget": "#dialog-container", "HX-Reswap": "innerHTML"}
+# HX-Reselect is required too: the triggering action's htmx.ajax() call sets
+# select: 'tr' (see the row-swap templates), and without overriding it here
+# that filter would still apply to this dialog fragment on error -- which
+# has no <tr> in it at all -- silently blanking the dialog instead of
+# showing the error. #dialog-root is the dialog's own outer wrapper div,
+# present in every _form_dialog.html/_detail_dialog.html response.
+_RETARGET_DIALOG_HEADERS = {
+    "HX-Retarget": "#dialog-container",
+    "HX-Reswap": "innerHTML",
+    "HX-Reselect": "#dialog-root",
+}
 
 
 def _parse_payload_or_none(payload_json: str) -> Any:
@@ -212,7 +222,20 @@ async def update_request(
             headers=_RETARGET_DIALOG_HEADERS,
         )
     updated = await service.get_review(pool, request_id)
-    return _render(request, "_operator_row_response.html", {"record": updated, "clear_dialog": True})
+    return _render(request, "_operator_row_response.html", {"record": updated})
+
+
+@router.get("/operator/{request_id}/cancel-form", response_class=HTMLResponse)
+async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_session_role("operator"))):
+    _, pool = _clients(request)
+    record = await service.get_review(pool, request_id)
+    if record is None or record["requester"] != user["username"]:
+        raise HTTPException(status_code=404)
+    return _render(
+        request,
+        "_cancel_dialog.html",
+        {"request_id": request_id, "review_type": record["review_type"]},
+    )
 
 
 @router.post("/operator/{request_id}/cancel", response_class=HTMLResponse)
@@ -291,4 +314,4 @@ async def manager_decision(
             headers=_RETARGET_DIALOG_HEADERS,
         )
     updated = await service.get_review(pool, request_id)
-    return _render(request, "_manager_row_response.html", {"record": updated, "clear_dialog": True})
+    return _render(request, "_manager_row_response.html", {"record": updated})

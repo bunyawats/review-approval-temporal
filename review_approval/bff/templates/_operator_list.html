@@ -1,6 +1,6 @@
 {% import "_operator_row.html" as row_macros %}
 {% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
-<table id="request-list" hx-get="/ui/operator/list" hx-trigger="every 5s" hx-swap="outerHTML"
+<table id="request-list" hx-get="/ui/operator/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
     <tr>

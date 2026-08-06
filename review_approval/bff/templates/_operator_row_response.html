@@ -1,3 +1,13 @@
 {% import "_operator_row.html" as row_macros %}
-{% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
+{#
+  A bare <tr> here would get its outer tr/td tags stripped by the browser's
+  HTML parser -- <tr>/<td> are only valid inside a table, and outside one the
+  tags are silently dropped, leaving their inner content as loose children of
+  whatever swaps them in (#request-list's <tbody>). Wrapping in a real
+  <table><tbody> gives the parser a valid context so the <tr> survives intact;
+  the caller then uses hx-select="tr" / {select: 'tr'} to pull just the <tr>
+  back out of this wrapper for the actual swap.
+#}
+<table><tbody>
 {{ row_macros.operator_row(record) }}
+</tbody></table>

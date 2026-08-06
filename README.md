@@ -165,9 +165,9 @@ uvicorn review_approval.app:app --reload --port 8000
 Whichever setup option you used, the UI lives at `/ui/*`, in the same
 FastAPI app as the JSON API.
 
-Open **http://localhost:8000** — it redirects to a mock login screen.
-Enter any username and click "Continue as Operator" or "Continue as
-Manager" (no password; a plain session cookie).
+Open **http://localhost:8000** — it redirects to a mock login screen with
+four one-click buttons (Operator One, Operator Two, Manager One, Manager
+Two) — no password, no username entry, just a plain session cookie.
 
 - **Operator screen** (`/ui/operator`) — shows only *your* requests. "+ New
   Request" opens a dialog to pick a review type and paste a JSON payload.
@@ -190,8 +190,11 @@ there's one source of truth for what's allowed.
 `http://localhost:8000/sandbox/` — standalone htmx experiments, no auth,
 no Temporal/Postgres, kept permanently alongside the app rather than
 thrown away after use. Runs against the app's actual pinned htmx/Tailwind
-CDN versions (via `base.html`). Currently has one experiment,
-`hx-indicator` (`/sandbox/hx-indicator/`).
+CDN versions (via `base.html`). Currently has two experiments:
+`hx-indicator` (`/sandbox/hx-indicator/`), which proved out the base
+`hx-indicator` mechanism, and `hx-indicator/timing`, a
+MutationObserver-instrumented harness for measuring exact swap timing
+instead of eyeballing it.
 
 ## Try it (JSON API)
 

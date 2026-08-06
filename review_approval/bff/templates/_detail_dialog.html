@@ -4,7 +4,7 @@
   "rejected": "bg-red-100 text-red-800",
   "cancelled": "bg-gray-200 text-gray-700",
 } %}
-<div class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
   <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
     <h2 class="text-lg font-semibold mt-0 mb-4">Request Detail</h2>
     {% if error %}
@@ -42,20 +42,30 @@
     {% endif %}
 
     {% if role == "manager" and record.status == "PENDING_REVIEW" %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional)</label>
+      <textarea id="decision-comment-{{ record.id }}"
+        class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm min-h-[80px]"></textarea>
+    </div>
     <div class="flex justify-end gap-2 mt-5">
       <button type="button"
         class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
         onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
-      <button type="button" hx-indicator="#reject-spinner"
-        class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
-        onclick="var c = prompt('Optional note for rejecting this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#row-{{ record.id }}', swap: 'outerHTML', values: {decision: 'REJECTED', comment: c}})">
-        <span id="reject-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+      {#
+        Same pattern as Cancel/Save: read the comment, close the dialog
+        immediately, then fire the decision in the background -- the row's
+        own Review button is the only thing left on screen to show
+        progress on, so that's where the spinner (already wired up via
+        hx-indicator on that button) goes.
+      #}
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
+        onclick="var c = document.getElementById('decision-comment-{{ record.id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: document.getElementById('review-btn-{{ record.id }}'), target: '#row-{{ record.id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {decision: 'REJECTED', comment: c}})">
         Reject
       </button>
-      <button type="button" hx-indicator="#approve-spinner"
-        class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
-        onclick="var c = prompt('Optional note for approving this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#row-{{ record.id }}', swap: 'outerHTML', values: {decision: 'APPROVED', comment: c}})">
-        <span id="approve-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
+        onclick="var c = document.getElementById('decision-comment-{{ record.id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: document.getElementById('review-btn-{{ record.id }}'), target: '#row-{{ record.id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {decision: 'APPROVED', comment: c}})">
         Approve
       </button>
     </div>

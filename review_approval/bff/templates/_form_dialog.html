@@ -1,15 +1,15 @@
-<div class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
   <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
     <h2 class="text-lg font-semibold mt-0 mb-4">{{ "New Review Request" if mode == "create" else "Edit Review Request" }}</h2>
     {% if error %}
     <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
     {% endif %}
     <form
-      hx-post="{{ '/ui/operator/requests' if mode == 'create' else '/ui/operator/' ~ request_id ~ '/update' }}"
       {% if mode == "create" %}
-      hx-target="#request-list" hx-swap="outerHTML swap:800ms" hx-indicator="#page-spinner"
+      hx-post="/ui/operator/requests"
+      hx-target="#request-list" hx-swap="outerHTML swap:400ms" hx-indicator="#create-spinner"
       {% else %}
-      hx-target="#row-{{ request_id }}" hx-swap="outerHTML" hx-indicator="#save-spinner"
+      onsubmit="return false"
       {% endif %}>
       <div class="mb-4">
         <label class="block text-xs font-semibold mb-1 text-gray-700">Review Type</label>
@@ -33,13 +33,25 @@
         <button type="button"
           class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
           onclick="document.getElementById('dialog-container').innerHTML=''">Cancel</button>
+        {% if mode == "create" %}
         <button type="submit"
-          class="{{ 'px-3.5 py-2' if mode == 'create' else 'inline-flex items-center gap-1.5 px-3.5 py-2' }} text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
-          {% if mode != "create" %}
-          <span id="save-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-          {% endif %}
-          {{ "Create" if mode == "create" else "Save" }}
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
+          Create
         </button>
+        {% else %}
+        {#
+          Edit's Save is deliberately NOT a form submit. The dialog closes
+          immediately on click (before the request is even sent) -- the
+          only place left to show progress is back on the row's Edit
+          button, so the payload has to be read out of the textarea here,
+          before dialog-container.innerHTML clobbers it.
+        #}
+        <button type="button"
+          class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700"
+          onclick="var payloadVal = document.getElementById('payload-textarea').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/operator/{{ request_id }}/update', {source: document.getElementById('edit-btn-{{ request_id }}'), target: '#row-{{ request_id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {payload_json: payloadVal}})">
+          Save
+        </button>
+        {% endif %}
       </div>
     </form>
     {% if sample_payloads %}

@@ -1,10 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="flex justify-between items-center mb-4">
-  <div class="flex items-center gap-2">
-    <h1 class="text-xl font-semibold m-0">All Review Requests</h1>
-    <span id="page-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></span>
-  </div>
+  <h1 class="text-xl font-semibold m-0">All Review Requests</h1>
 </div>
 {% include "_manager_list.html" %}
 {% endblock %}

@@ -63,6 +63,24 @@ async def hx_indicator_fast():
     return HTMLResponse("<strong>Done instantly (0ms sleep).</strong>")
 
 
+_CASE5_COUNTER = {"n": 0}
+
+
+@router.post("/hx-indicator/case5-action", response_class=HTMLResponse)
+async def hx_indicator_case5_action():
+    # Isolates whether confirm()/prompt() before an imperative htmx.ajax()
+    # call (the real app's Cancel/Approve/Reject pattern) breaks the
+    # indicator, vs. cases 1-4's declarative hx-post with no blocking
+    # dialogs. Returns a properly id'd fragment (unlike /fast's bare
+    # <strong>) so outerHTML-swapping #result5 survives repeat clicks.
+    _CASE5_COUNTER["n"] += 1
+    return HTMLResponse(
+        f'<div id="result5" class="text-sm text-gray-600 mt-2">'
+        f"Done, click #{_CASE5_COUNTER['n']} (0ms sleep, swap:800ms delay)"
+        f"</div>"
+    )
+
+
 # --------------------------------------------------------- timing diagnostic ---
 # Reproduces the real app's exact structural setup that cases 1-4 above don't
 # cover: a target with its OWN independent hx-trigger="every Ns" self-poll
