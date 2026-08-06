@@ -29,7 +29,8 @@ review-approval/
     └── bff/
         ├── __init__.py
         ├── main.py / ui.py / auth.py / mock_auth.py / schemas.py / service.py
-        └── templates/*.html
+        ├── sandbox.py        # /sandbox/* -- standalone htmx experiments
+        └── templates/*.html, templates/sandbox/*.html
 ```
 
 Every module imports every other module by its full package path —
@@ -173,6 +174,21 @@ Dependencies are declared once, in `pyproject.toml`'s `dependencies` list.
   (now visually decoupled) list actually updates. See the `htmx4`
   skill's "Loading indicators and swap timing" section for the general
   pattern and the OOB-swap-timing gotcha this depends on.
+- **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
+  experiments, kept permanently alongside the app rather than thrown
+  away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
+  route, since deleted). No auth, no Temporal/Postgres — deliberately
+  isolated so a mechanism can be verified on its own before touching
+  real templates. Its templates extend `base.html`, so experiments run
+  against the exact same htmx/Tailwind CDN pins as the real app rather
+  than a separately hardcoded version. Own `Jinja2Templates` instance
+  (not reused from `ui.py`) under `templates/sandbox/`, tagged
+  `"Sandbox"` in the OpenAPI docs. Currently has one experiment,
+  `hx-indicator` (`/sandbox/hx-indicator/`) — the four cases that
+  proved out the loading-indicator pattern documented under
+  `bff/templates/` above and in the `htmx4` skill. Add new experiments
+  as additional routes + a `templates/sandbox/*.html` file, linked from
+  `sandbox/index.html`.
 - **`bff/schemas.py`** — registry of Pydantic models keyed by
   `review_type`. Adding a review type touches two files: a model +
   registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`

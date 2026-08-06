@@ -28,6 +28,7 @@ from temporalio.client import Client
 from review_approval.bff import service
 from review_approval.bff.auth import get_current_user, require_role
 from review_approval.bff.mock_auth import RequireLoginRedirect
+from review_approval.bff.sandbox import router as sandbox_router
 from review_approval.bff.ui import router as ui_router
 
 
@@ -69,6 +70,7 @@ async def _redirect_to_login(request, exc):
 
 
 app.include_router(ui_router)
+app.include_router(sandbox_router)
 
 
 @app.get("/", tags=["Web UI"])

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-xl font-semibold mb-1">htmx sandbox</h1>
+<p class="text-gray-500 text-sm mb-5">
+  Standalone experiments, no auth, no Temporal/Postgres -- just poking at
+  htmx behavior in isolation using the same CDN pins as the real app.
+</p>
+<ul class="list-disc list-inside space-y-1 text-sm">
+  <li>
+    <a class="text-blue-600 hover:underline" href="/sandbox/hx-indicator/">hx-indicator</a>
+    <span class="text-gray-500"> -- loading-indicator mechanics: default CSS, swap:Nms delay, OOB-swap timing</span>
+  </li>
+</ul>
+{% endblock %}

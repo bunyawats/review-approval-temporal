@@ -29,4 +29,4 @@ dev = [
 include = ["review_approval*"]
 
 [tool.setuptools.package-data]
-"review_approval.bff" = ["templates/*.html"]
+"review_approval.bff" = ["templates/*.html", "templates/**/*.html"]
