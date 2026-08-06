@@ -193,41 +193,29 @@ or `bff/` respectively; don't put front-door-specific logic in
   class, so it isn't affected today, but a future utility-class addition
   could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
   no suffix before assuming it's still safe.
-  Two different loading-indicator patterns are in play here, chosen
-  per-action based on whether the dialog should stay open or close
-  immediately:
-  - **Create/Save** (`_form_dialog.html`) — the spinner is embedded
-    directly on the submit button (`#form-spinner`, matching the
-    `/sandbox/hx-indicator/` page's case 3 exactly: Tailwind-styled
-    circle, `hx-indicator` on the `<form>`, `swap: 'outerHTML
-    swap:800ms'` on the target). The dialog is meant to **stay open**,
-    spinner visibly spinning on the button, until the new/updated row
-    is actually visible in the list — so `_operator_list.html`'s
-    dialog-closing OOB div carries the *same* `swap:800ms` modifier
-    (`hx-swap-oob="innerHTML swap:800ms"`), not the bare
-    `hx-swap-oob="true"` it'd default to. Both swaps (main target + OOB)
-    are deliberately synchronized so the dialog closes at the same
-    moment the row appears, not before.
-  - **Approve/Reject/Cancel** (`_detail_dialog.html`,
-    `_operator_list.html`'s Cancel button) — the opposite: the dialog
-    (if any) closes **immediately** — Approve/Reject's OOB div stays
-    `hx-swap-oob="true"`, undelayed — while a *persistent-page*
-    `#page-spinner` (living in `operator.html`'s/`manager.html`'s
-    header, outside anything that gets swapped/destroyed) keeps
-    spinning until the delayed list swap lands. Wired via `hx-indicator`
-    + `source: this` + `swap: 'outerHTML swap:800ms'` on the
-    `htmx.ajax()` call. An indicator nested inside content that gets
-    destroyed (the dialog, or `#request-list` itself) only has a window
-    to be seen for as long as that content survives — which combined
-    with how fast a local action actually completes can be effectively
-    zero, hence needing it to live somewhere that survives the swap.
-  Don't assume one pattern generalizes to the other action without
-  checking which UX is wanted first — synchronizing the OOB delay
-  (Create/Save's approach) makes the dialog itself the loading
-  indicator's home; leaving it undelayed (Approve/Reject/Cancel's
-  approach) requires a spinner living outside the dialog entirely. See
-  the `htmx4` skill's "Loading indicators and swap timing" section for the
-  general pattern and the OOB-swap-timing gotcha this depends on.
+  One unified loading-indicator pattern covers every mutating action
+  (Create, Save, Approve, Reject, Cancel): the dialog (if any) closes
+  **immediately** on submit — every `hx-swap-oob` div stays the bare
+  `hx-swap-oob="true"`, undelayed — while a *persistent-page*
+  `#page-spinner` (living in `operator.html`'s/`manager.html`'s header,
+  next to the "My Review Requests"/"All Review Requests" heading, outside
+  anything that gets swapped/destroyed) keeps spinning until the delayed
+  list swap actually lands and the new/updated row is visible. Wired via
+  `hx-indicator="#page-spinner"` on `_form_dialog.html`'s `<form>` (for
+  Create/Save) and `hx-indicator` + `source: this` +
+  `swap: 'outerHTML swap:800ms'` on the `htmx.ajax()` calls in
+  `_detail_dialog.html` (Approve/Reject) and `_operator_list.html`
+  (Cancel). An indicator nested inside content that gets destroyed (the
+  dialog, or `#request-list` itself) only has a window to be seen for as
+  long as that content survives — which combined with how fast a local
+  action actually completes can be effectively zero, hence living
+  somewhere that survives the swap instead. An earlier version tried
+  embedding the spinner directly on the Create button with the dialog
+  staying open until the row appeared (synchronizing the OOB delay to
+  match) — reverted in favor of this simpler, consistent-everywhere
+  pattern. See the `htmx4` skill's "Loading indicators and swap timing"
+  section for the general mechanism and the OOB-swap-timing gotcha this
+  depends on.
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
   away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
