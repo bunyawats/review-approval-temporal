@@ -1,8 +1,9 @@
 """
 POC HTMX UI. Uses mock_auth.py (session cookie, no password) instead of
-the Keycloak JWT auth that bff/auth.py provides for the JSON API. Both
-routers call the same bff/service.py functions, so business rules
-(ownership checks, status checks, payload validation) live in one place.
+the Keycloak JWT auth that api/auth.py provides for the JSON API. Both
+front doors call the same workflow/service.py functions, so business
+rules (ownership checks, status checks, payload validation) live in one
+place.
 
 NOT for production use as-is -- see mock_auth.py's docstring.
 """
@@ -15,9 +16,9 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from review_approval.bff import service
 from review_approval.bff.mock_auth import login, logout, require_session_role
-from review_approval.bff.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
+from review_approval.workflow import service
+from review_approval.workflow.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
 router = APIRouter(prefix="/ui", tags=["Web UI"])
 templates = Jinja2Templates(

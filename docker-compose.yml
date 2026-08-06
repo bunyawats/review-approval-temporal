@@ -44,8 +44,9 @@ services:
     ports:
       - "8233:8080"
 
-  # Split into two roles on the SAME task queues -- see worker.py's
-  # docstring. REVIEW_TYPE is deliberately left UNSET here, so each of
+  # Split into two roles on the SAME task queues -- see
+  # workflow/worker.py's docstring. REVIEW_TYPE is deliberately left
+  # UNSET here, so each of
   # these two services polls EVERY known review type's queue -- keeps
   # local dev simple (no per-type service per review type). Scale the two
   # roles independently:
@@ -57,7 +58,7 @@ services:
   #
   #   worker-activity-purchase-order:
   #     build: .
-  #     command: python -m review_approval.worker
+  #     command: python -m review_approval.workflow.worker
   #     environment:
   #       WORKER_MODE: activity
   #       REVIEW_TYPE: purchase_order
@@ -69,7 +70,7 @@ services:
   # section.
   worker-workflow:
     build: .
-    command: python -m review_approval.worker
+    command: python -m review_approval.workflow.worker
     depends_on:
       - temporal
     environment:
@@ -83,7 +84,7 @@ services:
 
   worker-activity:
     build: .
-    command: python -m review_approval.worker
+    command: python -m review_approval.workflow.worker
     depends_on:
       - temporal
       - postgres
@@ -96,7 +97,7 @@ services:
 
   bff:
     build: .
-    command: uvicorn review_approval.bff.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn review_approval.app:app --host 0.0.0.0 --port 8000
     depends_on:
       - temporal
       - postgres

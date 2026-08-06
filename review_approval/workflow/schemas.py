@@ -4,7 +4,7 @@ Registry of payload schemas per review_type.
 Adding a new review type touches TWO places, not one:
   1. This file -- add a Pydantic model, a REVIEW_TYPE_SCHEMAS entry, and a
      SAMPLE_PAYLOADS entry (used to auto-populate the "New Request" form).
-  2. review_approval/task_queues.py -- add the type string to
+  2. review_approval/workflow/task_queues.py -- add the type string to
      KNOWN_REVIEW_TYPES.
 The assertions below fail loudly at import time if these drift apart,
 rather than silently starting workflows on a task queue nothing polls, or
@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from review_approval.task_queues import KNOWN_REVIEW_TYPES
+from review_approval.workflow.task_queues import KNOWN_REVIEW_TYPES
 
 
 class PurchaseOrderPayload(BaseModel):

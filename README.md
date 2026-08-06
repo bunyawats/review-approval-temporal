@@ -13,17 +13,21 @@ review-approval/
 │   ├── schema.sql           # applied by db/init/ on first Postgres boot
 │   └── init/
 └── review_approval/         # the installable package -- everything else
-    ├── workflows.py
-    ├── activities.py
-    ├── worker.py
-    ├── task_queues.py
-    └── bff/
-        ├── main.py          # JSON API (Keycloak auth)
-        ├── ui.py            # HTMX UI (mock auth)
-        ├── auth.py          # Keycloak JWT validation
-        ├── mock_auth.py     # POC-only session auth
-        ├── schemas.py       # per-review-type payload validation registry
-        ├── service.py       # shared business logic, both routers call this
+    ├── app.py               # FastAPI app: assembles bff + api + sandbox routers
+    ├── workflow/            # Temporal-side: workflow, activities, worker, task queues
+    │   ├── workflows.py
+    │   ├── activities.py
+    │   ├── worker.py
+    │   ├── task_queues.py
+    │   ├── service.py       # shared business logic -- both bff/ and api/ call this
+    │   └── schemas.py       # per-review-type payload validation registry
+    ├── api/                 # JSON REST surface (real Keycloak auth)
+    │   ├── routes.py
+    │   └── auth.py
+    └── bff/                 # HTMX UI (mock auth) + sandbox
+        ├── ui.py
+        ├── mock_auth.py
+        ├── sandbox.py       # /sandbox/* -- standalone htmx experiments
         └── templates/       # Jinja2/HTMX templates, Tailwind via CDN
 ```
 
@@ -33,31 +37,42 @@ module imports every other module by its real package path.
 
 ## Architecture
 
-- **`workflows.py`** — `ReviewApprovalWorkflow`. Payload-agnostic: it
-  carries `review_type` + `payload` through untouched. Waits durably on a
-  signal for the Manager's decision, or the requester's cancellation.
-- **`activities.py`** — the only code that touches Postgres.
-- **`worker.py`** — long-lived process that executes workflow/activity
-  code. `WORKER_MODE` env var (`both` / `workflow` / `activity`) controls
-  what it registers; `REVIEW_TYPE` controls which review type's task
-  queue(s) it polls (unset = all of them). Docker Compose runs it split
-  by role as `worker-workflow` (no DB credentials) and `worker-activity`
-  (needs `DATABASE_URL`).
-- **`task_queues.py`** — `KNOWN_REVIEW_TYPES` and the per-review-type
-  task queue naming scheme, so worker capacity can scale independently
-  per type instead of one shared pool serving everything.
-- **`bff/`** — FastAPI app. Validates Keycloak JWTs, enforces
-  Operator/Manager roles, starts workflows, sends signals, runs queries.
-  Temporal itself has no concept of roles — the BFF is the sole
-  enforcement point.
+- **`workflow/workflows.py`** — `ReviewApprovalWorkflow`. Payload-agnostic:
+  it carries `review_type` + `payload` through untouched. Waits durably on
+  a signal for the Manager's decision, or the requester's cancellation.
+- **`workflow/activities.py`** — the only code that touches Postgres.
+- **`workflow/worker.py`** — long-lived process that executes
+  workflow/activity code. `WORKER_MODE` env var (`both` / `workflow` /
+  `activity`) controls what it registers; `REVIEW_TYPE` controls which
+  review type's task queue(s) it polls (unset = all of them). Docker
+  Compose runs it split by role as `worker-workflow` (no DB credentials)
+  and `worker-activity` (needs `DATABASE_URL`).
+- **`workflow/task_queues.py`** — `KNOWN_REVIEW_TYPES` and the
+  per-review-type task queue naming scheme, so worker capacity can scale
+  independently per type instead of one shared pool serving everything.
+- **`workflow/service.py`** — shared business logic (ownership checks,
+  status checks, starts/signals workflows). Neither front door talks to
+  Temporal or Postgres directly — only this module does, which is what
+  keeps `bff/` (mock auth) and `api/` (real Keycloak auth) from drifting
+  out of sync on what's actually allowed.
+- **`api/`** — the JSON REST surface. Validates Keycloak JWTs, enforces
+  Operator/Manager roles, calls into `workflow/service.py`. Temporal
+  itself has no concept of roles — this is the sole enforcement point for
+  that front door.
+- **`bff/`** — the server-rendered HTMX UI (mock session auth, POC only)
+  plus `/sandbox/*`, a standalone playground for htmx experiments (no
+  auth, no Temporal/Postgres).
+- **`app.py`** — assembles the actual FastAPI app: lifespan (Temporal
+  client + Postgres pool), session middleware, and mounts all three
+  routers (`bff.ui`, `bff.sandbox`, `api.routes`).
 - **`db/schema.sql`** — Postgres table for listing/reporting/audit.
   Temporal is the source of truth for *live* state; Postgres is the
   queryable record.
 
 Adding a new review type touches two files: a Pydantic model in
-`review_approval/bff/schemas.py`, and its type string added to
-`KNOWN_REVIEW_TYPES` in `review_approval/task_queues.py`. An assertion at
-import time catches it if these two drift apart.
+`review_approval/workflow/schemas.py`, and its type string added to
+`KNOWN_REVIEW_TYPES` in `review_approval/workflow/task_queues.py`. An
+assertion at import time catches it if these two drift apart.
 
 ## Setup
 
@@ -134,13 +149,13 @@ export $(cat .env | xargs)  # or use a tool like direnv/python-dotenv
 #### 5. Run the worker (separate terminal)
 
 ```bash
-python -m review_approval.worker
+python -m review_approval.workflow.worker
 ```
 
-#### 6. Run the BFF (separate terminal)
+#### 6. Run the app (separate terminal)
 
 ```bash
-uvicorn review_approval.bff.main:app --reload --port 8000
+uvicorn review_approval.app:app --reload --port 8000
 ```
 
 </details>
@@ -165,10 +180,18 @@ Manager" (no password; a plain session cookie).
 Both screens poll every 5 seconds so a Manager's decision shows up on the
 Operator's screen (and vice versa) without a manual refresh.
 
-The UI calls `review_approval/bff/service.py` directly with its own mock
-session rather than going through the Keycloak-protected JSON API — both
-front doors funnel through the same `service.py` functions, so there's
-one source of truth for what's allowed.
+The UI calls `review_approval/workflow/service.py` directly with its own
+mock session rather than going through the Keycloak-protected JSON API —
+both front doors funnel through the same `service.py` functions, so
+there's one source of truth for what's allowed.
+
+## htmx sandbox
+
+`http://localhost:8000/sandbox/` — standalone htmx experiments, no auth,
+no Temporal/Postgres, kept permanently alongside the app rather than
+thrown away after use. Runs against the app's actual pinned htmx/Tailwind
+CDN versions (via `base.html`). Currently has one experiment,
+`hx-indicator` (`/sandbox/hx-indicator/`).
 
 ## Try it (JSON API)
 
@@ -227,8 +250,9 @@ You can also watch the workflow execute live in the Temporal Web UI at
 ## Scaling worker capacity per review type
 
 Each review type gets its own Temporal task queue
-(`task_queue_for_review_type()` in `review_approval/task_queues.py`).
-`worker.py` reads a `REVIEW_TYPE` env var:
+(`task_queue_for_review_type()` in
+`review_approval/workflow/task_queues.py`). `worker.py` reads a
+`REVIEW_TYPE` env var:
 
 - **Unset** (Compose's default) — one process polls every known type's
   queue. Simple, fine for local dev or a small deployment.
@@ -249,7 +273,7 @@ simple.
 - `review_approval/bff/mock_auth.py` and the `/ui/*` routes are POC-only
   — no password, no identity verification. Replace with a real
   Keycloak-backed session before this goes anywhere beyond a local demo.
-- `verify_aud=False` in `review_approval/bff/auth.py` — set and verify a
+- `verify_aud=False` in `review_approval/api/auth.py` — set and verify a
   real audience once the Keycloak client is configured.
 - No timeout on "wait for Manager decision" — consider adding a
   `workflow.wait_condition(..., timeout=...)` plus a reminder/escalation

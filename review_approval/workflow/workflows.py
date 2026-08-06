@@ -16,7 +16,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
-    from review_approval.activities import (
+    from review_approval.workflow.activities import (
         PersistCancelInput,
         PersistDecisionInput,
         PersistRequestInput,

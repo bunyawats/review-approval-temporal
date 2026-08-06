@@ -1,10 +1,11 @@
 """
 Run this as its own long-lived process:
 
-    python -m review_approval.worker
+    python -m review_approval.workflow.worker
 
-It's what actually executes workflow/activity code. The BFF only ever
-talks to the Temporal server, never to this process directly.
+It's what actually executes workflow/activity code. The FastAPI app
+(review_approval.app, via workflow/service.py) only ever talks to the
+Temporal server, never to this process directly.
 
 Two independent env vars control what this process does -- combine them
 freely, same image, same file, no code duplication:
@@ -41,14 +42,14 @@ import os
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from review_approval.activities import (
+from review_approval.workflow.activities import (
     persist_cancel,
     persist_decision,
     persist_request,
     persist_update,
 )
-from review_approval.task_queues import KNOWN_REVIEW_TYPES, task_queue_for_review_type
-from review_approval.workflows import ReviewApprovalWorkflow
+from review_approval.workflow.task_queues import KNOWN_REVIEW_TYPES, task_queue_for_review_type
+from review_approval.workflow.workflows import ReviewApprovalWorkflow
 
 VALID_MODES = ("both", "workflow", "activity")
 

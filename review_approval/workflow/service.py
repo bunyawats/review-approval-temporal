@@ -1,8 +1,8 @@
 """
-Core business logic. Neither router (main.py's JSON API, ui.py's HTMX
-pages) talks to Temporal or Postgres directly -- only this module does.
-That's what keeps the two front doors (real auth vs. mock auth) from
-drifting out of sync on what's actually allowed.
+Core business logic. Neither front door (api/routes.py's JSON API,
+bff/ui.py's HTMX pages) talks to Temporal or Postgres directly -- only
+this module does. That's what keeps the two front doors (real auth vs.
+mock auth) from drifting out of sync on what's actually allowed.
 """
 
 import uuid
@@ -11,9 +11,9 @@ from typing import Any, Optional
 import asyncpg
 from temporalio.client import Client
 
-from review_approval.bff.schemas import validate_payload
-from review_approval.task_queues import task_queue_for_review_type
-from review_approval.workflows import ReviewApprovalWorkflow, ReviewRequestInput
+from review_approval.workflow.schemas import validate_payload
+from review_approval.workflow.task_queues import task_queue_for_review_type
+from review_approval.workflow.workflows import ReviewApprovalWorkflow, ReviewRequestInput
 
 
 def workflow_id(request_id: str) -> str:
