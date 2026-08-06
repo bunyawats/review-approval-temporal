@@ -113,6 +113,28 @@ or `bff/` respectively; don't put front-door-specific logic in
   module rather than duplicating business logic (ownership checks,
   status checks, payload validation). Add new capabilities here first,
   then expose from both routers.
+  **`create_review`/`update_review`/`cancel_review`/`submit_decision`
+  all wait for their write to actually land in Postgres before
+  returning** (`_wait_until()`, a bounded poll: 50ms interval, 5s
+  timeout, always returns whatever it last read even on timeout rather
+  than raising). This exists because `client.start_workflow()` and
+  `handle.signal()` only confirm Temporal *accepted* the start/signal —
+  not that the workflow has run its handler or that the resulting
+  `persist_*` activity (which runs asynchronously, whenever a worker
+  process picks up the task) has actually committed. Without this, a
+  caller that immediately re-queries Postgres afterward (every mutating
+  route does, to re-render the list) can see stale pre-write data — on
+  a local dev box with everything on localhost this race is usually won
+  by luck, not guaranteed by anything the code actually enforces, and
+  "usually" isn't good enough for a UI action whose whole point is
+  showing the confirmed result. Verified: adds ~5-10ms in the normal
+  case (confirmed via `time curl`), and degrades gracefully (waits the
+  full 5s, then returns without raising) if the worker is down entirely
+  — confirmed by killing the worker process mid-test; the row landed
+  correctly once the worker came back, since the underlying Temporal
+  operation was never abandoned, only the client-side wait for it gave
+  up. Any new mutating capability added to this file needs the same
+  treatment — don't return until the caller can actually see the effect.
 - **`workflow/schemas.py`** — registry of Pydantic models keyed by
   `review_type`. Adding a review type touches two files: a model +
   registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`
