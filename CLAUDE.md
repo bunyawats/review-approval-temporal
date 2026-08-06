@@ -213,9 +213,25 @@ or `bff/` respectively; don't put front-door-specific logic in
   embedding the spinner directly on the Create button with the dialog
   staying open until the row appeared (synchronizing the OOB delay to
   match) — reverted in favor of this simpler, consistent-everywhere
-  pattern. See the `htmx4` skill's "Loading indicators and swap timing"
-  section for the general mechanism and the OOB-swap-timing gotcha this
-  depends on.
+  pattern. `#page-spinner` also carries Tailwind's `transition-opacity
+  duration-200` (unconditionally, not just on the `.htmx-request` show
+  rule) — htmx's own injected CSS only animates the *show* direction
+  (`.htmx-request .htmx-indicator{opacity:1;transition:opacity
+  200ms ease-in}`); the base `.htmx-indicator{opacity:0}` hide rule has
+  no transition at all, so without this addition the spinner cuts off
+  instantly while `#request-list` (which can have many rows after
+  real usage) is still being parsed/laid out/painted, reading as "the
+  spinner vanished before the new row showed up" even though the
+  underlying DOM-mutation-then-indicator-removal ordering is correct —
+  confirmed via a MutationObserver-instrumented reproduction at
+  `/sandbox/hx-indicator/timing` that logs exact millisecond deltas
+  instead of relying on how it looks. See the `htmx4` skill's "Loading
+  indicators and swap timing" section for the general mechanism, the
+  OOB-swap-timing gotcha this depends on, and the diagnostic-tooling
+  lesson from building that reproduction (don't split one click's
+  side effects across an inline `onclick=` and a separately-registered
+  `addEventListener` when their relative firing order matters for what
+  you're measuring — inline attribute handlers fire first).
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
   away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
@@ -225,12 +241,16 @@ or `bff/` respectively; don't put front-door-specific logic in
   against the exact same htmx/Tailwind CDN pins as the real app rather
   than a separately hardcoded version. Own `Jinja2Templates` instance
   (not reused from `ui.py`) under `templates/sandbox/`, tagged
-  `"Sandbox"` in the OpenAPI docs. Currently has one experiment,
+  `"Sandbox"` in the OpenAPI docs. Currently has two experiments:
   `hx-indicator` (`/sandbox/hx-indicator/`) — the four cases that
   proved out the loading-indicator pattern documented above and in the
-  `htmx4` skill. Add new experiments as additional routes in this file
-  plus a `templates/sandbox/*.html` file, linked from
-  `sandbox/index.html`.
+  `htmx4` skill — and `hx-indicator/timing` (linked from that page) — a
+  MutationObserver-instrumented reproduction of the real app's exact
+  self-polling-target + external-indicator + delayed-swap structure,
+  logging millisecond-precision deltas into an on-page `<pre>` instead
+  of relying on how a transition looks. Add new experiments as
+  additional routes in this file plus a `templates/sandbox/*.html`
+  file, linked from `sandbox/index.html`.
 - **`db/schema.sql`** — Postgres is the queryable/audit record; the JSON
   API's `GET /reviews` and the UI's list screens read from it directly
   (reads only — writes always go through a workflow signal/activity).

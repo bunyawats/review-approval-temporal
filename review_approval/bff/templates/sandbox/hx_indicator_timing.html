@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="mb-4"><a class="text-blue-600 hover:underline text-sm" href="/sandbox/hx-indicator/">&larr; hx-indicator</a></p>
+<h1 class="text-xl font-semibold mb-1">hx-indicator timing diagnostic</h1>
+<p class="text-gray-500 text-sm mb-6">
+  Reproduces the real app's exact structure: a target that self-polls every 3s (like
+  #request-list's every-5s poll), an indicator living OUTSIDE that target (like
+  #page-spinner), and a button that fires a delayed swap:800ms update to the same target.
+  Uses MutationObserver to log exact millisecond timestamps instead of relying on what it
+  looks like -- click "Do Action" once, then read (or copy) the log below.
+</p>
+
+<div class="flex items-center gap-2 mb-4">
+  <h2 class="font-semibold">Page heading (like "My Review Requests")</h2>
+  <span id="ext-spinner" class="htmx-indicator w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></span>
+</div>
+
+<button id="action-btn" class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 mb-4"
+  hx-indicator="#ext-spinner">
+  Do Action
+</button>
+
+<div id="poll-wrapper">
+  <div id="poll-target" hx-get="/sandbox/hx-indicator/timing/poll-target" hx-trigger="every 3s" hx-swap="outerHTML"
+    class="border border-gray-200 rounded-md p-3 text-sm mb-4">
+    (waiting for first poll...)
+  </div>
+</div>
+
+<h2 class="font-semibold mb-1">Timing log</h2>
+<pre id="timing-log" class="bg-gray-50 border border-gray-200 rounded-md p-3 text-xs h-64 overflow-y-auto whitespace-pre-wrap"></pre>
+<button class="mt-2 px-2.5 py-1 text-xs font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+  onclick="document.getElementById('timing-log').textContent = ''">Clear log</button>
+
+<script>
+  (function () {
+    var log = document.getElementById("timing-log");
+    var t0 = null;
+
+    function line(msg) {
+      var t = performance.now();
+      var delta = t0 === null ? "0.0" : (t - t0).toFixed(1);
+      log.textContent += "[+" + delta + "ms] " + msg + "\n";
+      log.scrollTop = log.scrollHeight;
+    }
+
+    // Single listener does both the logging AND fires the request, in that
+    // order -- an earlier version used a separate inline onclick= for the
+    // htmx.ajax() call alongside this addEventListener for logging, and
+    // inline onclick= (wired up at parse time) fired BEFORE this listener
+    // (attached later, after the deferred script ran) on every click. That
+    // meant the indicator's add always happened before t0 was reset here,
+    // making every "ADDED" line show a huge, stale delta against the
+    // *previous* click's t0 -- looked exactly like a mystery spontaneous
+    // re-add seconds later, when it was really this click's own (correct,
+    // immediate) add logged against the wrong timestamp. Lesson: don't
+    // split one click's side effects across two separately-registered
+    // listeners when their relative order matters for what you're timing.
+    document.getElementById("action-btn").addEventListener("click", function () {
+      t0 = performance.now();
+      line("Do Action clicked (t0)");
+      htmx.ajax("POST", "/sandbox/hx-indicator/timing/action", {
+        source: this, target: "#poll-target", swap: "outerHTML swap:800ms"
+      });
+    });
+
+    // Watch the indicator's class attribute for add/remove of htmx-request.
+    var spinner = document.getElementById("ext-spinner");
+    var hadRequestClass = spinner.classList.contains("htmx-request");
+    new MutationObserver(function () {
+      var has = spinner.classList.contains("htmx-request");
+      if (has !== hadRequestClass) {
+        hadRequestClass = has;
+        line("indicator htmx-request class " + (has ? "ADDED (spinner showing)" : "REMOVED (spinner hidden)"));
+      }
+    }).observe(spinner, { attributes: true, attributeFilter: ["class"] });
+
+    // Watch #poll-wrapper (a stable parent that never itself gets swapped) for
+    // #poll-target being replaced -- fires on every swap, including the
+    // periodic poll, so poll noise is visible too, not just the click's own.
+    var pollWrapper = document.getElementById("poll-wrapper");
+    new MutationObserver(function () {
+      var el = document.getElementById("poll-target");
+      var text = el ? el.textContent.trim() : "(removed)";
+      line("#poll-target content changed -> \"" + text + "\"");
+    }).observe(pollWrapper, { childList: true, subtree: true });
+
+    line("instrumentation ready");
+  })();
+</script>
+{% endblock %}

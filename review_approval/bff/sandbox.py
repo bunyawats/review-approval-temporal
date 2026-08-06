@@ -61,3 +61,49 @@ async def hx_indicator_slow():
 @router.post("/hx-indicator/fast", response_class=HTMLResponse)
 async def hx_indicator_fast():
     return HTMLResponse("<strong>Done instantly (0ms sleep).</strong>")
+
+
+# --------------------------------------------------------- timing diagnostic ---
+# Reproduces the real app's exact structural setup that cases 1-4 above don't
+# cover: a target with its OWN independent hx-trigger="every Ns" self-poll
+# (like #request-list), an hx-indicator living OUTSIDE that target (like
+# #page-spinner in operator.html's header), and a button-triggered delayed
+# swap of that same polled target (like Cancel/Approve/Reject/Create). Logs
+# exact millisecond timestamps (via MutationObserver, not eyeballing) for when
+# the indicator class is removed vs. when the target's content actually
+# changes, into a <pre> that survives the swap so the numbers can be read
+# back and pasted verbatim -- turns "it looks like X happens before Y" into
+# a number you can actually compare.
+
+_TIMING_COUNTER = {"n": 0}
+
+
+@router.get("/hx-indicator/timing", response_class=HTMLResponse)
+async def hx_indicator_timing_page(request: Request):
+    return _render(request, "sandbox/hx_indicator_timing.html", {})
+
+
+@router.get("/hx-indicator/timing/poll-target", response_class=HTMLResponse)
+async def hx_indicator_timing_poll_target():
+    _TIMING_COUNTER["n"] += 1
+    return HTMLResponse(
+        f'<div id="poll-target" hx-get="/sandbox/hx-indicator/timing/poll-target" '
+        f'hx-trigger="every 3s" hx-swap="outerHTML" '
+        f'class="border border-gray-200 rounded-md p-3 text-sm">'
+        f"Poll tick #{_TIMING_COUNTER['n']} (auto-refreshes every 3s, just like "
+        f"#request-list refreshes every 5s in the real app)"
+        f"</div>"
+    )
+
+
+@router.post("/hx-indicator/timing/action", response_class=HTMLResponse)
+async def hx_indicator_timing_action():
+    _TIMING_COUNTER["n"] += 1
+    return HTMLResponse(
+        f'<div id="poll-target" hx-get="/sandbox/hx-indicator/timing/poll-target" '
+        f'hx-trigger="every 3s" hx-swap="outerHTML" '
+        f'class="border border-green-400 bg-green-50 rounded-md p-3 text-sm">'
+        f"Action completed, tick #{_TIMING_COUNTER['n']} "
+        f"(this is the delayed swap:800ms response)"
+        f"</div>"
+    )
