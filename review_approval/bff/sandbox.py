@@ -51,8 +51,11 @@ async def hx_indicator_page(request: Request):
 
 @router.post("/hx-indicator/slow", response_class=HTMLResponse)
 async def hx_indicator_slow():
-    await asyncio.sleep(2)
-    return HTMLResponse("<strong>Done after 2s sleep.</strong>")
+    # 30s is comfortably under htmx's default 60000ms request timeout, so
+    # this exercises a long-running spinner without hitting that limit --
+    # the indicator should spin the whole 30s with nothing to interrupt it.
+    await asyncio.sleep(30)
+    return HTMLResponse("<strong>Done after 30s sleep.</strong>")
 
 
 @router.post("/hx-indicator/fast", response_class=HTMLResponse)

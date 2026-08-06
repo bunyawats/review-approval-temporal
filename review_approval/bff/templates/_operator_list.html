@@ -1,4 +1,4 @@
-{% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
+{% if clear_dialog %}<div id="dialog-container" hx-swap-oob="innerHTML swap:800ms"></div>{% endif %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",

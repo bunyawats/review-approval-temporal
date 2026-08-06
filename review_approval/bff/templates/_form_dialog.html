@@ -6,7 +6,7 @@
     {% endif %}
     <form
       hx-post="{{ '/ui/operator/requests' if mode == 'create' else '/ui/operator/' ~ request_id ~ '/update' }}"
-      hx-target="#request-list" hx-swap="outerHTML swap:800ms" hx-indicator="#page-spinner">
+      hx-target="#request-list" hx-swap="outerHTML swap:800ms" hx-indicator="#form-spinner">
       <div class="mb-4">
         <label class="block text-xs font-semibold mb-1 text-gray-700">Review Type</label>
         {% if mode == "create" %}
@@ -30,7 +30,8 @@
           class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
           onclick="document.getElementById('dialog-container').innerHTML=''">Cancel</button>
         <button type="submit"
-          class="px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
+          class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
+          <span id="form-spinner" class="htmx-indicator w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
           {{ "Create" if mode == "create" else "Save" }}
         </button>
       </div>

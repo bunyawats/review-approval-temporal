@@ -193,25 +193,40 @@ or `bff/` respectively; don't put front-door-specific logic in
   class, so it isn't affected today, but a future utility-class addition
   could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
   no suffix before assuming it's still safe.
-  The Create/Save form's loading indicator (`operator.html`'s
-  `#page-spinner`, wired via `_form_dialog.html`'s
-  `hx-indicator="#page-spinner"` and `hx-swap="outerHTML swap:800ms"`)
-  deliberately lives in `operator.html`'s persistent header, **not**
-  inside the dialog or inside `#request-list` — both of those get
-  destroyed/replaced as part of a successful submit, so an indicator
-  nested in either only has a window to be seen for as long as content
-  survives, which combined with how fast a local Create actually
-  completes can be effectively zero. The dialog itself closes
-  immediately (its `hx-swap-oob="true"` div has no delay); only the
-  main list swap carries the `swap:800ms` modifier — this is
-  intentional, not an inconsistency: it lets the dialog close right
-  away while the persistent-page spinner keeps spinning until the
-  (now visually decoupled) list actually updates. The same pattern
-  (`hx-indicator` + `source: this` + `swap: 'outerHTML swap:800ms'`)
-  is applied to `_detail_dialog.html`'s Approve/Reject and
-  `_operator_list.html`'s Cancel too, each pointing at its own page's
-  `#page-spinner` (`operator.html`'s or `manager.html`'s). See the
-  `htmx4` skill's "Loading indicators and swap timing" section for the
+  Two different loading-indicator patterns are in play here, chosen
+  per-action based on whether the dialog should stay open or close
+  immediately:
+  - **Create/Save** (`_form_dialog.html`) — the spinner is embedded
+    directly on the submit button (`#form-spinner`, matching the
+    `/sandbox/hx-indicator/` page's case 3 exactly: Tailwind-styled
+    circle, `hx-indicator` on the `<form>`, `swap: 'outerHTML
+    swap:800ms'` on the target). The dialog is meant to **stay open**,
+    spinner visibly spinning on the button, until the new/updated row
+    is actually visible in the list — so `_operator_list.html`'s
+    dialog-closing OOB div carries the *same* `swap:800ms` modifier
+    (`hx-swap-oob="innerHTML swap:800ms"`), not the bare
+    `hx-swap-oob="true"` it'd default to. Both swaps (main target + OOB)
+    are deliberately synchronized so the dialog closes at the same
+    moment the row appears, not before.
+  - **Approve/Reject/Cancel** (`_detail_dialog.html`,
+    `_operator_list.html`'s Cancel button) — the opposite: the dialog
+    (if any) closes **immediately** — Approve/Reject's OOB div stays
+    `hx-swap-oob="true"`, undelayed — while a *persistent-page*
+    `#page-spinner` (living in `operator.html`'s/`manager.html`'s
+    header, outside anything that gets swapped/destroyed) keeps
+    spinning until the delayed list swap lands. Wired via `hx-indicator`
+    + `source: this` + `swap: 'outerHTML swap:800ms'` on the
+    `htmx.ajax()` call. An indicator nested inside content that gets
+    destroyed (the dialog, or `#request-list` itself) only has a window
+    to be seen for as long as that content survives — which combined
+    with how fast a local action actually completes can be effectively
+    zero, hence needing it to live somewhere that survives the swap.
+  Don't assume one pattern generalizes to the other action without
+  checking which UX is wanted first — synchronizing the OOB delay
+  (Create/Save's approach) makes the dialog itself the loading
+  indicator's home; leaving it undelayed (Approve/Reject/Cancel's
+  approach) requires a spinner living outside the dialog entirely. See
+  the `htmx4` skill's "Loading indicators and swap timing" section for the
   general pattern and the OOB-swap-timing gotcha this depends on.
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
