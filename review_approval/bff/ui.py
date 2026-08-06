@@ -30,8 +30,23 @@ def _clients(request: Request):
     return request.app.state.temporal_client, request.app.state.pg_pool
 
 
-def _render(request: Request, template: str, ctx: dict, status_code: int = 200) -> HTMLResponse:
-    return templates.TemplateResponse(request, template, ctx, status_code=status_code)
+def _render(
+    request: Request,
+    template: str,
+    ctx: dict,
+    status_code: int = 200,
+    headers: dict | None = None,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, template, ctx, status_code=status_code, headers=headers
+    )
+
+
+# Error responses from routes whose success path retargets the swap to a
+# single row (HX-Retarget below) still need to land in the dialog instead --
+# these headers tell htmx to swap the re-rendered dialog fragment into
+# #dialog-container regardless of what hx-target the triggering element had.
+_RETARGET_DIALOG_HEADERS = {"HX-Retarget": "#dialog-container", "HX-Reswap": "innerHTML"}
 
 
 def _parse_payload_or_none(payload_json: str) -> Any:
@@ -113,6 +128,7 @@ async def create_request(
                 "error": "Payload must be valid JSON.",
             },
             400,
+            headers=_RETARGET_DIALOG_HEADERS,
         )
     try:
         await service.create_review(client, pool, review_type, payload, user["username"])
@@ -128,6 +144,7 @@ async def create_request(
                 "error": str(e),
             },
             400,
+            headers=_RETARGET_DIALOG_HEADERS,
         )
     reviews = await service.list_reviews(pool, requester=user["username"])
     return _render(request, "_operator_list.html", {"reviews": reviews, "clear_dialog": True})
@@ -175,6 +192,7 @@ async def update_request(
                 "error": "Payload must be valid JSON.",
             },
             400,
+            headers=_RETARGET_DIALOG_HEADERS,
         )
     try:
         await service.update_review(client, pool, request_id, user["username"], payload)
@@ -191,9 +209,10 @@ async def update_request(
                 "error": str(e),
             },
             400,
+            headers=_RETARGET_DIALOG_HEADERS,
         )
-    reviews = await service.list_reviews(pool, requester=user["username"])
-    return _render(request, "_operator_list.html", {"reviews": reviews, "clear_dialog": True})
+    updated = await service.get_review(pool, request_id)
+    return _render(request, "_operator_row_response.html", {"record": updated, "clear_dialog": True})
 
 
 @router.post("/operator/{request_id}/cancel", response_class=HTMLResponse)
@@ -208,8 +227,13 @@ async def cancel_request_route(
         await service.cancel_review(client, pool, request_id, user["username"], comment)
     except (LookupError, PermissionError, ValueError):
         pass  # POC: swallow and just show current true state on refresh
-    reviews = await service.list_reviews(pool, requester=user["username"])
-    return _render(request, "_operator_list.html", {"reviews": reviews})
+    updated = await service.get_review(pool, request_id)
+    if updated is None:
+        # Genuinely gone (not a normal flow -- nothing in this app deletes
+        # rows outright). outerHTML-swapping empty content just removes
+        # the row, which is the reasonable outcome here.
+        return HTMLResponse("")
+    return _render(request, "_operator_row_response.html", {"record": updated})
 
 
 @router.get("/operator/{request_id}/detail", response_class=HTMLResponse)
@@ -264,6 +288,7 @@ async def manager_decision(
             "_detail_dialog.html",
             {"record": record, "role": "manager", "error": str(e)},
             400,
+            headers=_RETARGET_DIALOG_HEADERS,
         )
-    reviews = await service.list_reviews(pool)
-    return _render(request, "_manager_list.html", {"reviews": reviews, "clear_dialog": True})
+    updated = await service.get_review(pool, request_id)
+    return _render(request, "_manager_row_response.html", {"record": updated, "clear_dialog": True})

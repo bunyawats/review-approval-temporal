@@ -46,12 +46,18 @@
       <button type="button"
         class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
         onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
-      <button type="button" hx-indicator="#page-spinner"
-        class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
-        onclick="var c = prompt('Optional note for rejecting this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#request-list', swap: 'outerHTML swap:800ms', values: {decision: 'REJECTED', comment: c}})">Reject</button>
-      <button type="button" hx-indicator="#page-spinner"
-        class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
-        onclick="var c = prompt('Optional note for approving this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#request-list', swap: 'outerHTML swap:800ms', values: {decision: 'APPROVED', comment: c}})">Approve</button>
+      <button type="button" hx-indicator="#reject-spinner"
+        class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
+        onclick="var c = prompt('Optional note for rejecting this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#row-{{ record.id }}', swap: 'outerHTML', values: {decision: 'REJECTED', comment: c}})">
+        <span id="reject-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+        Reject
+      </button>
+      <button type="button" hx-indicator="#approve-spinner"
+        class="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
+        onclick="var c = prompt('Optional note for approving this request:'); if (c === null) return; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: this, target: '#row-{{ record.id }}', swap: 'outerHTML', values: {decision: 'APPROVED', comment: c}})">
+        <span id="approve-spinner" class="htmx-indicator transition-opacity duration-200 w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+        Approve
+      </button>
     </div>
     {% else %}
     <div class="flex justify-end gap-2 mt-5">

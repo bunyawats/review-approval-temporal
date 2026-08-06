@@ -1,10 +1,5 @@
+{% import "_operator_row.html" as row_macros %}
 {% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
-{% set badge_classes = {
-  "pending_review": "bg-amber-100 text-amber-800",
-  "approved": "bg-green-100 text-green-800",
-  "rejected": "bg-red-100 text-red-800",
-  "cancelled": "bg-gray-200 text-gray-700",
-} %}
 <table id="request-list" hx-get="/ui/operator/list" hx-trigger="every 5s" hx-swap="outerHTML"
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
@@ -18,27 +13,7 @@
   </thead>
   <tbody>
     {% for r in reviews %}
-    <tr>
-      <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
-      <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
-        <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(r.status|lower, 'bg-gray-200 text-gray-700') }}">
-          {{ r.status|replace("_", " ") }}
-        </span>
-      </td>
-      <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm text-gray-500">{{ r.closed_comment or "—" }}</td>
-      <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm text-gray-500">{{ r.closed_by or "—" }}</td>
-      <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
-        {% if r.status == "PENDING_REVIEW" %}
-        <button class="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 mr-1.5"
-          hx-get="/ui/operator/{{ r.id }}/edit-form" hx-target="#dialog-container" hx-swap="innerHTML">Edit</button>
-        <button class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700" hx-indicator="#page-spinner"
-          onclick="if (!confirm('Cancel this request?')) return; var c = prompt('Optional note for cancelling this request:'); if (c === null) return; htmx.ajax('POST', '/ui/operator/{{ r.id }}/cancel', {source: this, target: '#request-list', swap: 'outerHTML swap:800ms', values: {comment: c}})">Cancel</button>
-        {% else %}
-        <button class="px-2.5 py-1 text-xs font-medium rounded-md bg-blue-100 text-blue-800 hover:bg-blue-200"
-          hx-get="/ui/operator/{{ r.id }}/detail" hx-target="#dialog-container" hx-swap="innerHTML">View</button>
-        {% endif %}
-      </td>
-    </tr>
+    {{ row_macros.operator_row(r) }}
     {% else %}
     <tr><td colspan="5" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
     {% endfor %}

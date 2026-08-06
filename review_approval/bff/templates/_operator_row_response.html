@@ -1,0 +1,3 @@
+{% import "_operator_row.html" as row_macros %}
+{% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
+{{ row_macros.operator_row(record) }}
