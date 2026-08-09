@@ -143,13 +143,40 @@ or `bff/` respectively; don't put front-door-specific logic in
   it.
 - **`api/routes.py`** — the JSON REST surface, real Keycloak auth. Thin:
   each route extracts params, calls `workflow/service.py`, maps
-  exceptions to HTTP status codes.
-- **`api/auth.py`** — Keycloak JWT validation + role-check dependency
-  (`require_role("operator")` / `require_role("manager")`) for the JSON
-  API. Temporal has zero concept of roles — this is the sole enforcement
-  point for this front door. `KEYCLOAK_ISSUER` is read lazily, on first
+  exceptions to HTTP status codes. Each route depends on
+  `require_permission(...)` (see `api/auth.py` below), never a role
+  check. `POST /reviews/{id}/decision` is the one route needing **two**
+  different permissions depending on the request body — `APPROVED` needs
+  `Approve_Request`, `REJECTED` needs `Reject_Request` — which a single
+  dependency can't express, so that route checks the permission matching
+  the submitted `decision` value inside the handler itself rather than
+  via the dependency list.
+- **`api/auth.py`** — Keycloak JWT validation + **permission-check**
+  dependency (`require_permission(permission: str)`) for the JSON API —
+  not a role check. Temporal has zero concept of roles or permissions;
+  this is the sole enforcement point for this front door.
+  **The app checks permissions, never role names.** Five fine-grained
+  permissions exist as plain Keycloak realm roles: `Create_Request`,
+  `Update_Request`, `Cancel_Request` (Operator's), `Approve_Request`,
+  `Reject_Request` (Manager's). `Operator` and `Manager` are themselves
+  realm roles too, but **composite** ones — each just bundles the
+  relevant permission roles as members; Keycloak auto-expands composite
+  membership into the token's `realm_access.roles` claim, so a user
+  holding `Operator` and a user granted its three permissions directly
+  are indistinguishable to this app. `require_permission()` only ever
+  checks for a specific permission string in that claim — it never
+  checks for `Operator`/`Manager` by name, and doesn't know they exist.
+  **This is what makes adding a new role a Keycloak-only config
+  change**: a future `Auditor` role that can create and cancel requests
+  but not approve/reject is just a new composite realm role bundling
+  `Create_Request` + `Cancel_Request` in Keycloak's admin console — no
+  code here changes, since none of it ever referenced `Operator`/
+  `Manager` as concepts. `KEYCLOAK_ISSUER` is read lazily, on first
   actual call to a protected route, not at import time, so the app
-  (including `/ui/*`) runs fully without Keycloak configured at all.
+  (including `/ui/*`, which has its own separate, unrelated
+  `require_session_role()` check against the mock-auth session cookie —
+  this permission model is API-only) runs fully without Keycloak
+  configured at all.
 - **`bff/mock_auth.py`** — session-cookie auth for the **POC UI only**
   (`bff/ui.py`). No password, no identity check — trusts whatever role
   the login form submitted. Never use for the JSON API. Swap-out path to
@@ -452,6 +479,15 @@ only** — not a preview of the Kubernetes shape below.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
+- **The permission-based authorization design documented in the
+  `api/auth.py`/`api/routes.py` bullets above is not implemented yet.**
+  `require_role("operator")`/`require_role("manager")` are still the
+  actual checks in code today; `require_permission()` doesn't exist.
+  Keycloak itself also has zero provisioning anywhere in this repo (no
+  realm export, no `docker-compose.yml` service, no composite-role
+  setup) — the README's Keycloak setup section still describes the
+  simpler two-realm-role version. This is the next implementation step,
+  not yet done.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
 - `bff/mock_auth.py` / `/ui/*` have no real authentication — see its

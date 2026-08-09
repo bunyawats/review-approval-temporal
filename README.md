@@ -56,9 +56,12 @@ module imports every other module by its real package path.
   keeps `bff/` (mock auth) and `api/` (real Keycloak auth) from drifting
   out of sync on what's actually allowed.
 - **`api/`** — the JSON REST surface. Validates Keycloak JWTs, enforces
-  Operator/Manager roles, calls into `workflow/service.py`. Temporal
-  itself has no concept of roles — this is the sole enforcement point for
-  that front door.
+  fine-grained permissions (`Create_Request`, `Update_Request`,
+  `Cancel_Request`, `Approve_Request`, `Reject_Request`) rather than
+  role names, calls into `workflow/service.py`. Temporal itself has no
+  concept of roles or permissions — this is the sole enforcement point
+  for that front door. See the Keycloak setup section below for how
+  `Operator`/`Manager` map onto these permissions.
 - **`bff/`** — the server-rendered HTMX UI (mock session auth, POC only)
   plus `/sandbox/*`, a standalone playground for htmx experiments (no
   auth, no Temporal/Postgres).
@@ -129,10 +132,34 @@ Starts the Temporal Service on `localhost:7233` and the Web UI at
 
 #### 3. Keycloak (optional — only needed for the JSON API, not `/ui/*`)
 
-You'll need a realm with:
-- Two realm roles: `operator`, `manager`
+> **Note:** this describes the target design (permission-based, see
+> `CLAUDE.md`'s `api/auth.py` bullet and its "Known gaps" entry) — the
+> app still checks plain roles today, so this section is not yet
+> reflected in code. Treat it as the spec for the next implementation
+> pass, not current behavior.
+
+The JSON API checks **permissions, not roles**. You'll need a realm with:
+
+- Five fine-grained realm roles, one per permission: `Create_Request`,
+  `Update_Request`, `Cancel_Request`, `Approve_Request`, `Reject_Request`
+- Two **composite** realm roles for convenient assignment: `Operator`
+  (composite of `Create_Request`, `Update_Request`, `Cancel_Request`) and
+  `Manager` (composite of `Approve_Request`, `Reject_Request`) — Keycloak
+  expands composite membership into the token automatically, so a user
+  assigned `Operator` ends up with all three of its permissions in the
+  token's `realm_access.roles` claim, same as if they'd been granted
+  each one individually
 - A client for the BFF
-- Users assigned the `operator` and/or `manager` realm roles
+- Users assigned `Operator` and/or `Manager` (or any subset of the five
+  permission roles directly, for finer-grained access than the two
+  bundles provide)
+
+Adding a new role later (e.g. an `Auditor` who can create and cancel
+requests but not approve/reject) is pure Keycloak admin-console
+config — create a new composite realm role bundling whichever
+permission roles it needs, assign it to users. No application code
+changes, since the app never checks for `Operator`/`Manager`/`Auditor`
+by name, only for the specific permission it needs at each route.
 
 Point `KEYCLOAK_ISSUER` at `http://<host>:<port>/realms/<your-realm>`.
 
