@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from review_approval.api.auth import get_current_user, require_role
+from review_approval.api.auth import check_permission, get_current_user, require_permission
 from review_approval.workflow import service
 
 router = APIRouter(tags=["REST Services"])
@@ -37,7 +37,7 @@ class CancelRequest(BaseModel):
 async def create_review(
     request: Request,
     body: CreateReviewRequest,
-    user: dict = Depends(require_role("operator")),
+    user: dict = Depends(require_permission("Create_Request")),
 ):
     try:
         request_id = await service.create_review(
@@ -65,7 +65,7 @@ async def update_review(
     request_id: str,
     body: CreateReviewRequest,
     request: Request,
-    user: dict = Depends(require_role("operator")),
+    user: dict = Depends(require_permission("Update_Request")),
 ):
     try:
         await service.update_review(
@@ -88,7 +88,7 @@ async def update_review(
 async def cancel_review(
     request_id: str,
     request: Request,
-    user: dict = Depends(require_role("operator")),
+    user: dict = Depends(require_permission("Cancel_Request")),
     body: Optional[CancelRequest] = None,
 ):
     comment = body.comment if body else ""
@@ -114,8 +114,13 @@ async def submit_decision(
     request_id: str,
     body: DecisionRequest,
     request: Request,
-    user: dict = Depends(require_role("manager")),
+    user: dict = Depends(get_current_user),
 ):
+    # Approve/reject need different permissions -- which one depends on
+    # the request body, so this can't be expressed as a single
+    # Depends(require_permission(...)); check it explicitly instead.
+    permission = "Approve_Request" if body.decision == "APPROVED" else "Reject_Request"
+    await check_permission(user, permission)
     try:
         await service.submit_decision(
             request.app.state.temporal_client,

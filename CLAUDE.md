@@ -447,32 +447,37 @@ only** — not a preview of the Kubernetes shape below.
 - The same `Dockerfile` used for Compose works as the K8s manifest base —
   no Compose-specific assumptions baked in.
 
+## In progress: full Keycloak integration
+
+**`keycloak/INTEGRATION_PLAN.md` has a phased plan and status tracker —
+read it before touching auth-related code.** Phase 1 (REST API
+permission enforcement + tests) is done. Real login for `/ui/*` and
+permission enforcement on its routes (Phases 2-3) are not — `bff/
+mock_auth.py` and its `require_session_role()` are still exactly what
+they were before this effort started. This section exists so a new
+session picks up the tracker immediately rather than assuming otherwise.
+
 ## Known gaps
 
 - No timeout on "wait for Manager decision" — requests can wait forever.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
-- **The permission-based authorization design in the `api/auth.py`
-  bullet above is only half done.** Keycloak itself is fully provisioned
-  and verified (see the `keycloak` bullet). The **application code
-  hasn't caught up at all**: `api/auth.py`/`api/routes.py` still check
-  `require_role("operator")`/`require_role("manager")` against the plain
-  JWT's `realm_access.roles` claim — `require_permission()` doesn't
-  exist, and implementing it now needs a real UMA ticket exchange (see
-  the `keycloak-admin` skill), not just fixing the string being checked,
-  since the five permissions are Resources now and never appear in that
-  claim at all. Confirmed live: a real, validly-signed token for
-  `operator1` gets `403 requires role: operator` calling `POST /reviews`
-  — the JWT itself checks out fine (the stale lowercase role check would
-  even pass today, since `Operator` is still a real role, just
-  wrong-cased) — only the intended permission check is entirely unbuilt.
-  Next implementation step.
+- **The `api/` (REST) side of permission-based authorization is done**
+  — `require_permission()`/`check_permission()` in `api/auth.py`, a real
+  UMA ticket exchange via `workflow/keycloak_auth.py`, wired into every
+  `api/routes.py` route, covered by `tests/unit/test_keycloak_auth.py`
+  (mocked) and `tests/integration/test_api_permissions.py` (real
+  Keycloak + full local stack). **The `bff/` (`/ui/*`) side is not** —
+  see `keycloak/INTEGRATION_PLAN.md`'s status tracker (Phase 1 of 4
+  done). `bff/mock_auth.py` still trusts whatever role a session cookie
+  claims; no real login, no permission checks on `/ui/*` routes yet.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
-- `bff/mock_auth.py` / `/ui/*` have no real authentication — see its
-  docstring before extending or deploying it anywhere shared.
-- No test suite yet.
+- Test suite covers Phase 1's scope (the Keycloak auth core + REST API
+  enforcement) only — no workflow/activity tests yet (`tests/` exists
+  now, under the repo root per the "Testing changes" section below;
+  extend it, don't start a second test tree).
 
 ## Running locally
 
@@ -506,7 +511,14 @@ lean on it; if in doubt, stop whichever instance you're not using
 
 ## Testing changes
 
-There's no test suite yet. When adding one, prefer Temporal's
-`temporalio.testing.WorkflowEnvironment` (time-skipping test environment)
-for workflow/activity tests over hitting a real Temporal server. Tests go
-under a new `tests/` directory at the repo root, not inside the package.
+`tests/` at the repo root (not inside the package), split
+`tests/unit/` (no live services — mock at the HTTP layer with `respx`
+for anything hitting Keycloak; `PyJWKClient` fetches via `urllib`, not
+`httpx`, so JWT-validation tests instead patch the key-resolution step
+directly and let the real `jwt.decode()` run against a locally-generated
+keypair — see `tests/unit/test_keycloak_auth.py`) and
+`tests/integration/` (needs the real local stack — Keycloak, Postgres,
+Temporal, worker — up; marked `@pytest.mark.integration`, deselect with
+`pytest -m "not integration"`). No workflow/activity tests yet; when
+adding them, prefer Temporal's `temporalio.testing.WorkflowEnvironment`
+(time-skipping test environment) over hitting a real Temporal server.

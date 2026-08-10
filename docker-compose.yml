@@ -110,6 +110,8 @@ services:
       # protected routes just 503 if Keycloak isn't actually reachable yet
       # when called, so this doesn't need to block bff's own startup.
       KEYCLOAK_ISSUER: http://keycloak:8080/realms/myrealm
+      KEYCLOAK_CLIENT_ID: review-approval
+      KEYCLOAK_CLIENT_SECRET: dev-secret-change-me
       UI_SESSION_SECRET: local-compose-dev-secret
     ports:
       - "8000:8000"
