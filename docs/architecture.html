@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review/Approval — System Architecture</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --ink: #1b2430;
+    --ink-muted: #5b6577;
+    --line: #d8dce3;
+    --line-strong: #b7bdc9;
+    --accent-sync: #0e7c86;
+    --accent-async: #a66a00;
+    --accent-auth: #8a93a6;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --font-sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161c;
+      --surface: #1b212b;
+      --ink: #e7e9ed;
+      --ink-muted: #9aa3b2;
+      --line: #2c3441;
+      --line-strong: #3c4657;
+      --accent-sync: #3fc1cb;
+      --accent-async: #e3a64a;
+      --accent-auth: #8a93a6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161c;
+    --surface: #1b212b;
+    --ink: #e7e9ed;
+    --ink-muted: #9aa3b2;
+    --line: #2c3441;
+    --line-strong: #3c4657;
+    --accent-sync: #3fc1cb;
+    --accent-async: #e3a64a;
+    --accent-auth: #8a93a6;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --ink: #1b2430;
+    --ink-muted: #5b6577;
+    --line: #d8dce3;
+    --line-strong: #b7bdc9;
+    --accent-sync: #0e7c86;
+    --accent-async: #a66a00;
+    --accent-auth: #8a93a6;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 56px 24px 80px;
+    line-height: 1.55;
+  }
+
+  header {
+    margin-bottom: 40px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 24px;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: var(--font-mono);
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 12px;
+    text-wrap: balance;
+  }
+
+  header p {
+    font-size: 15.5px;
+    color: var(--ink-muted);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  figure {
+    margin: 0 0 8px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 20px 6px;
+  }
+
+  .diagram-scroll {
+    overflow-x: auto;
+  }
+
+  svg.arch {
+    display: block;
+    width: 100%;
+    height: auto;
+    min-width: 760px;
+    color: var(--ink);
+  }
+
+  svg.arch text { font-family: var(--font-mono); fill: currentColor; }
+  svg.arch .label-title { font-size: 13px; font-weight: 600; }
+  svg.arch .label-sub { font-size: 10.5px; fill: var(--ink-muted); }
+  svg.arch .edge-label { font-size: 10.5px; fill: var(--ink-muted); }
+  svg.arch .region-label {
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    fill: var(--ink-muted);
+    text-transform: uppercase;
+  }
+
+  figcaption {
+    font-size: 13px;
+    color: var(--ink-muted);
+    padding: 14px 2px 16px;
+    border-top: 1px solid var(--line);
+    margin-top: 10px;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin: 20px 0 44px;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+    font-family: var(--font-mono);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .swatch { display: inline-block; width: 26px; height: 0; border-top-width: 2px; border-top-style: solid; }
+  .swatch.sync { border-color: var(--accent-sync); }
+  .swatch.async { border-color: var(--accent-async); border-top-style: dashed; }
+  .swatch.auth { border-color: var(--accent-auth); border-top-style: dotted; border-top-width: 3px; }
+
+  h2 {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 16px;
+    font-weight: 600;
+  }
+
+  .notes {
+    display: grid;
+    gap: 14px;
+  }
+
+  .note {
+    display: grid;
+    grid-template-columns: 168px 1fr;
+    gap: 16px;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13.5px;
+  }
+  .note dt {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .note dd {
+    margin: 0;
+    color: var(--ink-muted);
+  }
+  .note dd code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+
+  @media (max-width: 620px) {
+    .note { grid-template-columns: 1fr; gap: 4px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">review-approval-temporal</p>
+  <h1>System architecture</h1>
+  <p>Two front doors share one business-logic layer, which issues a direct read
+  or a Temporal signal — and, on the write path, waits for that signal's
+  effect to actually land in Postgres before it answers the caller.</p>
+</header>
+
+<figure>
+  <div class="diagram-scroll">
+    <svg class="arch" viewBox="0 0 1240 970" role="img" aria-label="Architecture diagram: a browser or REST client authenticates against Keycloak, then calls bff/ui.py or api/routes.py inside one FastAPI process. Both routers call workflow/service.py, which either reads Postgres directly or signals Temporal Server. Temporal dispatches to per-review-type task queues; a worker-workflow process executes the workflow and a worker-activity process executes persist_* activities that write to Postgres. service.py polls Postgres in a bounded loop until that asynchronous write becomes visible before returning to the caller.">
+
+      <defs>
+        <marker id="arrow-sync" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent-sync)" />
+        </marker>
+        <marker id="arrow-async" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent-async)" />
+        </marker>
+        <marker id="arrow-auth" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent-auth)" />
+        </marker>
+        <marker id="arrow-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+        </marker>
+      </defs>
+
+      <!-- ===== clients ===== -->
+      <rect x="60" y="30" width="260" height="66" rx="7" fill="none" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="190" y="58" text-anchor="middle" class="label-title">Browser</text>
+      <text x="190" y="74" text-anchor="middle" class="label-sub">Operator / Manager</text>
+      <text x="190" y="88" text-anchor="middle" class="label-sub">session cookie</text>
+
+      <rect x="490" y="30" width="260" height="66" rx="7" fill="none" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="620" y="58" text-anchor="middle" class="label-title">REST client</text>
+      <text x="620" y="74" text-anchor="middle" class="label-sub">external system</text>
+      <text x="620" y="88" text-anchor="middle" class="label-sub">bearer JWT</text>
+
+      <!-- ===== keycloak ===== -->
+      <rect x="900" y="30" width="280" height="130" rx="7" fill="none" stroke="var(--line-strong)" stroke-width="1.4" stroke-dasharray="1,0"/>
+      <text x="1040" y="56" text-anchor="middle" class="label-title">Keycloak</text>
+      <text x="1040" y="74" text-anchor="middle" class="label-sub">realm: myrealm</text>
+      <text x="1040" y="90" text-anchor="middle" class="label-sub">roles: Operator, Manager</text>
+      <text x="1040" y="106" text-anchor="middle" class="label-sub">5 Resources, role-based Policies</text>
+      <text x="1040" y="122" text-anchor="middle" class="label-sub">checked via UMA ticket exchange</text>
+      <text x="1040" y="142" text-anchor="middle" class="label-sub">not a role claim on the JWT itself</text>
+
+      <!-- browser -> keycloak (login redirect) -->
+      <path d="M320,50 L900,80" fill="none" stroke="var(--accent-auth)" stroke-width="1.4" stroke-dasharray="1,4" stroke-linecap="round" marker-end="url(#arrow-auth)"/>
+      <text x="590" y="45" text-anchor="middle" class="edge-label">Authorization Code login redirect</text>
+
+      <!-- fastapi boundary -> keycloak (token / uma exchange) -->
+      <path d="M840,300 L900,140" fill="none" stroke="var(--accent-auth)" stroke-width="1.4" stroke-dasharray="1,4" stroke-linecap="round" marker-end="url(#arrow-auth)"/>
+      <text x="960" y="230" text-anchor="middle" class="edge-label">code exchange +</text>
+      <text x="960" y="244" text-anchor="middle" class="edge-label">UMA permission check</text>
+
+      <!-- ===== fastapi process boundary ===== -->
+      <rect x="40" y="150" width="840" height="260" rx="10" fill="none" stroke="var(--line)" stroke-width="1.3" stroke-dasharray="5,4"/>
+      <text x="60" y="174" class="region-label">FastAPI process — uvicorn review_approval.app:app</text>
+
+      <rect x="60" y="196" width="260" height="66" rx="7" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="190" y="222" text-anchor="middle" class="label-title">bff/ui.py</text>
+      <text x="190" y="238" text-anchor="middle" class="label-sub">HTMX screens, /ui/*</text>
+      <text x="190" y="252" text-anchor="middle" class="label-sub">require_session_role / require_permission</text>
+
+      <rect x="490" y="196" width="260" height="66" rx="7" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="620" y="222" text-anchor="middle" class="label-title">api/routes.py</text>
+      <text x="620" y="238" text-anchor="middle" class="label-sub">JSON REST, /reviews</text>
+      <text x="620" y="252" text-anchor="middle" class="label-sub">require_permission per route</text>
+
+      <rect x="230" y="322" width="360" height="66" rx="7" fill="var(--surface)" stroke="var(--ink)" stroke-width="1.6"/>
+      <text x="410" y="348" text-anchor="middle" class="label-title">workflow/service.py</text>
+      <text x="410" y="364" text-anchor="middle" class="label-sub">ownership + status checks,</text>
+      <text x="410" y="378" text-anchor="middle" class="label-sub">the only caller of Temporal or Postgres</text>
+
+      <path d="M190,262 L230,322" fill="none" stroke="currentColor" stroke-width="1.3" marker-end="url(#arrow-ink)"/>
+      <path d="M620,262 L560,322" fill="none" stroke="currentColor" stroke-width="1.3" marker-end="url(#arrow-ink)"/>
+      <path d="M190,96 L190,196" fill="none" stroke="currentColor" stroke-width="1.3" marker-end="url(#arrow-ink)"/>
+      <path d="M620,96 L620,196" fill="none" stroke="currentColor" stroke-width="1.3" marker-end="url(#arrow-ink)"/>
+
+      <!-- ===== fork: postgres read / temporal signal ===== -->
+      <rect x="80" y="470" width="280" height="100" rx="8" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.5"/>
+      <text x="220" y="500" text-anchor="middle" class="label-title">PostgreSQL</text>
+      <text x="220" y="518" text-anchor="middle" class="label-sub">review_approval db</text>
+      <text x="220" y="534" text-anchor="middle" class="label-sub">queryable record — reads only</text>
+      <text x="220" y="550" text-anchor="middle" class="label-sub">for both front doors</text>
+
+      <rect x="520" y="470" width="280" height="100" rx="8" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.5"/>
+      <text x="660" y="500" text-anchor="middle" class="label-title">Temporal Server</text>
+      <text x="660" y="518" text-anchor="middle" class="label-sub">orchestration only</text>
+      <text x="660" y="534" text-anchor="middle" class="label-sub">workflow id: review-{request_id}</text>
+      <text x="660" y="550" text-anchor="middle" class="label-sub">source of truth for live state</text>
+
+      <path d="M355,388 L355,411 L220,411 L220,470" fill="none" stroke="var(--accent-sync)" stroke-width="1.6" marker-end="url(#arrow-sync)"/>
+      <text x="290" y="404" text-anchor="middle" class="edge-label">read: list_reviews / get_review</text>
+
+      <path d="M465,388 L465,431 L660,431 L660,470" fill="none" stroke="var(--accent-sync)" stroke-width="1.6" marker-end="url(#arrow-sync)"/>
+      <text x="565" y="424" text-anchor="middle" class="edge-label">start_workflow / signal — accepted, not yet applied</text>
+
+      <!-- poll-back loop -->
+      <path d="M80,510 L20,510 L20,355 L230,355" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <text x="70" y="432" text-anchor="middle" class="edge-label" transform="rotate(-90 70 432)">poll until write visible — 50ms / 5s cap</text>
+
+      <!-- ===== task queues ===== -->
+      <rect x="520" y="630" width="360" height="58" rx="7" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="700" y="654" text-anchor="middle" class="label-title">task queues — one per review_type</text>
+      <text x="700" y="670" text-anchor="middle" class="label-sub">purchase_order · leave_request</text>
+
+      <path d="M660,570 L700,630" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <text x="740" y="606" text-anchor="middle" class="edge-label">dispatch task</text>
+
+      <!-- ===== workers ===== -->
+      <rect x="520" y="770" width="180" height="90" rx="7" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="610" y="796" text-anchor="middle" class="label-title">worker</text>
+      <text x="610" y="812" text-anchor="middle" class="label-sub">WORKER_MODE=workflow</text>
+      <text x="610" y="826" text-anchor="middle" class="label-sub">runs ReviewApprovalWorkflow,</text>
+      <text x="610" y="840" text-anchor="middle" class="label-sub">no DATABASE_URL needed</text>
+
+      <rect x="740" y="770" width="180" height="90" rx="7" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.4"/>
+      <text x="830" y="796" text-anchor="middle" class="label-title">worker</text>
+      <text x="830" y="812" text-anchor="middle" class="label-sub">WORKER_MODE=activity</text>
+      <text x="830" y="826" text-anchor="middle" class="label-sub">runs persist_* activities,</text>
+      <text x="830" y="840" text-anchor="middle" class="label-sub">the only code that writes Postgres</text>
+
+      <path d="M650,688 L610,770" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <path d="M750,688 L830,770" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <text x="700" y="720" text-anchor="middle" class="edge-label">poll (both worker modes)</text>
+
+      <!-- async write loop back to postgres -->
+      <path d="M740,830 L20,830 L20,570" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <text x="380" y="822" text-anchor="middle" class="edge-label">persist_request / persist_decision / persist_update / persist_cancel</text>
+
+    </svg>
+  </div>
+  <figcaption>
+    A request's write path in one line: <strong>service.py</strong> signals
+    Temporal and gets an immediate ack — the actual Postgres row only exists
+    once a <code>worker-activity</code> process later picks up the task and
+    runs the matching <code>persist_*</code> activity, which is why
+    <code>service.py</code> polls Postgres in a bounded loop rather than
+    trusting the signal ack alone.
+  </figcaption>
+</figure>
+
+<div class="legend">
+  <span><i class="swatch sync"></i>direct call, awaited</span>
+  <span><i class="swatch async"></i>Temporal-mediated, eventually consistent</span>
+  <span><i class="swatch auth"></i>Keycloak — auth, out of band</span>
+</div>
+
+<section>
+  <h2>Deployable units</h2>
+  <dl class="notes">
+    <div class="note">
+      <dt>bff</dt>
+      <dd>One process, one image: <code>uvicorn review_approval.app:app</code> serves <code>bff/ui.py</code>, <code>api/routes.py</code>, and <code>/sandbox/*</code> together — not split by front door.</dd>
+    </div>
+    <div class="note">
+      <dt>worker-workflow</dt>
+      <dd><code>python -m review_approval.workflow.worker</code>, <code>WORKER_MODE=workflow</code>. Executes workflow code only — never opens a Postgres connection.</dd>
+    </div>
+    <div class="note">
+      <dt>worker-activity</dt>
+      <dd>Same entrypoint, <code>WORKER_MODE=activity</code>. The only code in the system permitted to write to Postgres, via one activity per state change.</dd>
+    </div>
+    <div class="note">
+      <dt>Postgres</dt>
+      <dd>One instance, two databases: <code>review_approval</code> (drawn above — this app's queryable record) and a separate <code>temporal</code> database used only by Temporal Server's own internal persistence, never touched by application code.</dd>
+    </div>
+    <div class="note">
+      <dt>Keycloak</dt>
+      <dd><code>Operator</code>/<code>Manager</code> are plain realm roles, gating which screen a session can see. The five mutating actions are Resources, not roles — checking one always costs a live UMA call, by design; there is no permission-result caching yet.</dd>
+    </div>
+  </dl>
+</section>
+
+</body>
+</html>

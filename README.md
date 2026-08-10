@@ -37,6 +37,14 @@ module imports every other module by its real package path.
 
 ## Architecture
 
+See [`docs/architecture.html`](docs/architecture.html) for a diagram of
+the request flow — open it in a browser (it's self-contained, no server
+needed). It's the one place that draws the async write path end to end:
+`service.py` signals Temporal and gets an immediate ack, but the actual
+Postgres row only exists once `worker-activity` later runs the matching
+`persist_*` activity, which is why `service.py` polls Postgres in a
+bounded loop before answering the caller.
+
 - **`workflow/workflows.py`** — `ReviewApprovalWorkflow`. Payload-agnostic:
   it carries `review_type` + `payload` through untouched. Waits durably on
   a signal for the Manager's decision, or the requester's cancellation.
