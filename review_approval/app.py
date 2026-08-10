@@ -1,8 +1,9 @@
 """
 The FastAPI app itself: assembles both front doors into one process.
 
-  - bff/ui.py's /ui/* routes: mock session auth (mock_auth.py), for the
-    POC demo UI only.
+  - bff/ui.py's /ui/* routes: real Keycloak session auth
+    (keycloak_session.py, Authorization Code flow) -- see
+    keycloak/INTEGRATION_PLAN.md for what's still Phase 2/3 in progress.
   - api/routes.py's JSON routes: real Keycloak JWT auth (api/auth.py),
     for actual clients/integrations.
   - bff/sandbox.py's /sandbox/* routes: standalone htmx experiments, no
@@ -30,7 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from temporalio.client import Client
 
 from review_approval.api.routes import router as api_router
-from review_approval.bff.mock_auth import RequireLoginRedirect
+from review_approval.bff.keycloak_session import RequireLoginRedirect
 from review_approval.bff.sandbox import router as sandbox_router
 from review_approval.bff.ui import router as ui_router
 

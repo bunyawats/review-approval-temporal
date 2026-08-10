@@ -2,29 +2,11 @@
 {% block content %}
 <div class="max-w-sm mx-auto mt-20 bg-white rounded-xl p-7 shadow-sm border border-gray-100">
   <h1 class="text-xl font-semibold mt-0 mb-1">Review / Approval POC</h1>
-  <p class="text-gray-500 text-sm mb-5">Mock login &mdash; no password, for demo purposes only.</p>
-  <div class="flex flex-col gap-2">
-    <form method="post" action="/ui/login">
-      <input type="hidden" name="username" value="operator1">
-      <button type="submit" name="role" value="operator"
-        class="w-full px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Operator One</button>
-    </form>
-    <form method="post" action="/ui/login">
-      <input type="hidden" name="username" value="operator2">
-      <button type="submit" name="role" value="operator"
-        class="w-full px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Operator Two</button>
-    </form>
-    <form method="post" action="/ui/login">
-      <input type="hidden" name="username" value="manager1">
-      <button type="submit" name="role" value="manager"
-        class="w-full px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Manager One</button>
-    </form>
-    <form method="post" action="/ui/login">
-      <input type="hidden" name="username" value="manager2">
-      <button type="submit" name="role" value="manager"
-        class="w-full px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Manager Two</button>
-    </form>
-  </div>
+  <p class="text-gray-500 text-sm mb-5">Sign in with your Keycloak account.</p>
+  <a href="{{ authorize_url }}"
+    class="block text-center w-full px-3.5 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">
+    Log in with Keycloak
+  </a>
   {% if error %}
   <p class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mt-4">{{ error }}</p>
   {% endif %}

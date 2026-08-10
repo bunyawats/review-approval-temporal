@@ -31,9 +31,9 @@ review-approval/
     ├── api/                  # JSON REST surface (real Keycloak auth)
     │   ├── __init__.py
     │   └── routes.py / auth.py
-    └── bff/                  # HTMX UI (mock auth) + htmx sandbox
+    └── bff/                  # HTMX UI (real Keycloak session auth) + sandbox
         ├── __init__.py
-        ├── ui.py / mock_auth.py / sandbox.py
+        ├── ui.py / keycloak_session.py / sandbox.py
         └── templates/*.html, templates/sandbox/*.html
 ```
 
@@ -175,15 +175,40 @@ or `bff/` respectively; don't put front-door-specific logic in
   `applyPolicies` — no code here ever references role names, only
   Resource names. `KEYCLOAK_ISSUER` is read lazily, on first actual call
   to a protected route, not at import time, so the app (including
-  `/ui/*`, which has its own separate, unrelated `require_session_role()`
-  check against the mock-auth session cookie — this permission model is
+  `/ui/*`, which has its own separate `require_session_role()` check
+  (see `bff/keycloak_session.py` below) — this permission model is
   API-only) runs fully without Keycloak configured at all.
-- **`bff/mock_auth.py`** — session-cookie auth for the **POC UI only**
-  (`bff/ui.py`). No password, no identity check — trusts whatever role
-  the login form submitted. Never use for the JSON API. Swap-out path to
-  real auth: replace what `login()` trusts with a Keycloak Authorization
-  Code flow; keep storing `{"username", "role"}` in the session so
-  `ui.py` doesn't need to change.
+- **`bff/keycloak_session.py`** — real Keycloak session auth for `/ui/*`
+  (Authorization Code flow), replacing the earlier mock `bff/mock_auth.py`
+  (deleted). `login()`'s old "trust the submitted role" is gone;
+  `build_authorize_url()`/`complete_login()` do a real redirect + code
+  exchange against Keycloak. **`require_session_role()` still exists as
+  a deliberate Phase 2 bridge, not the real authorization mechanism** —
+  see `keycloak/INTEGRATION_PLAN.md` (Phase 3 replaces it with real
+  `workflow/keycloak_auth.get_permissions()` checks, same as `api/`
+  already does). The session stores `role` ("operator"/"manager",
+  lowercase) derived once at login from the token's `realm_access.roles`
+  claim purely so this bridge keeps working — don't build anything new
+  on top of that field, it goes away in Phase 3.
+  **Deliberately does NOT store `refresh_token`/`id_token`** — Starlette's
+  `SessionMiddleware` signs the whole session into one browser cookie
+  (no server-side store), and all three JWTs together measured ~4.5KB
+  signed, over the ~4KB limit real browsers enforce per cookie (measured
+  directly, not assumed — `curl` doesn't enforce that limit, so a
+  curl-only test of this would have silently passed while a real browser
+  failed). No token refresh this phase either, for the same
+  keep-it-small reason plus not being needed yet — an expired access
+  token (5 min lifetime) just forces re-login rather than transparently
+  refreshing. Logout redirects through Keycloak's own end-session
+  endpoint using `client_id` (not `id_token_hint`, since none is
+  stored) — this makes Keycloak show a confirmation page instead of
+  logging out silently (real, documented OIDC RP-initiated-logout
+  behavior, not a bug), a deliberate trade against the cookie-size
+  constraint. See the `keycloak-admin` skill's "Authorization Code flow"
+  section for the exact gotchas hit building this (the `post.logout.
+  redirect.uris` client attribute, its `##`-delimited-string format, and
+  why the commonly-documented `"+"` shorthand didn't work against this
+  Keycloak version).
 - **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
   `/ui/operator`, `/ui/manager`). Every route calls `workflow/service.py`,
   never Temporal/Postgres directly. Dialogs are HTML fragments swapped
@@ -450,11 +475,10 @@ only** — not a preview of the Kubernetes shape below.
 ## In progress: full Keycloak integration
 
 **`keycloak/INTEGRATION_PLAN.md` has a phased plan and status tracker —
-read it before touching auth-related code.** Phase 1 (REST API
-permission enforcement + tests) is done. Real login for `/ui/*` and
-permission enforcement on its routes (Phases 2-3) are not — `bff/
-mock_auth.py` and its `require_session_role()` are still exactly what
-they were before this effort started. This section exists so a new
+read it before touching auth-related code.** Phases 1-2 (REST API
+permission enforcement, and real BFF login, both with tests) are done.
+Phase 3 — replacing `bff/ui.py`'s `require_session_role()` role-bridge
+with real permission checks — is not. This section exists so a new
 session picks up the tracker immediately rather than assuming otherwise.
 
 ## Known gaps
@@ -463,15 +487,19 @@ session picks up the tracker immediately rather than assuming otherwise.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
-- **The `api/` (REST) side of permission-based authorization is done**
-  — `require_permission()`/`check_permission()` in `api/auth.py`, a real
-  UMA ticket exchange via `workflow/keycloak_auth.py`, wired into every
-  `api/routes.py` route, covered by `tests/unit/test_keycloak_auth.py`
-  (mocked) and `tests/integration/test_api_permissions.py` (real
-  Keycloak + full local stack). **The `bff/` (`/ui/*`) side is not** —
-  see `keycloak/INTEGRATION_PLAN.md`'s status tracker (Phase 1 of 4
-  done). `bff/mock_auth.py` still trusts whatever role a session cookie
-  claims; no real login, no permission checks on `/ui/*` routes yet.
+- **Permission-based authorization is done for `api/` (REST), not yet
+  for `bff/` (`/ui/*`).** `api/auth.py`'s `require_permission()`/
+  `check_permission()` do a real UMA ticket exchange via
+  `workflow/keycloak_auth.py`, wired into every `api/routes.py` route —
+  covered by `tests/unit/test_keycloak_auth.py` (mocked) and
+  `tests/integration/test_api_permissions.py` (real Keycloak + full
+  local stack). `bff/ui.py` has real login now (`bff/keycloak_session.py`,
+  Phase 2) but still gates routes via `require_session_role()`'s
+  lowercase-role bridge, not real permissions — see
+  `keycloak/INTEGRATION_PLAN.md`'s status tracker (Phase 3).
+- No access-token refresh in `bff/keycloak_session.py` — a 5-minute-old
+  session just forces re-login. Deliberate simplification, not an
+  oversight — see that module's docstring.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
 - Test suite covers Phase 1's scope (the Keycloak auth core + REST API

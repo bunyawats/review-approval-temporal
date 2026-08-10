@@ -15,9 +15,28 @@
 > - [x] Phase 1 — integration tests (`tests/integration/test_api_permissions.py`,
 >       11 tests against the real local stack, all passing) —
 >       **Phase 1 complete.**
-> - [ ] Phase 2 — real BFF login flow
-> - [ ] Phase 3 — BFF permission enforcement
-> - [ ] Phase 4 — cleanup (delete mock_auth.py, update CLAUDE.md/README.md)
+> - [x] Phase 2 — `bff/keycloak_session.py` (Authorization Code flow,
+>       replaces `bff/mock_auth.py` -- **already deleted**, not deferred
+>       to Phase 4), real login/callback/logout routes in `bff/ui.py`,
+>       `login.html` updated, realm's `redirectUris`/`post.logout.
+>       redirect.uris` tightened from `["*"]` to real URLs
+> - [x] Phase 2 — integration tests (`tests/integration/test_bff_login.py`,
+>       4 tests: operator login, manager login, wrong password rejected,
+>       logout) — verified against both `TestClient` and the real native
+>       app. **Phase 2 complete.** Two real bugs caught only by testing
+>       this properly instead of eyeballing the code, both written up in
+>       the `keycloak-admin` skill: cookie-size (dropped
+>       refresh_token/id_token from the session -- all three JWTs
+>       together were ~4.5KB signed, over what real browsers accept per
+>       cookie) and `post.logout.redirect.uris` needing to be set
+>       explicitly (a wrong assumption that `redirectUris` alone would
+>       cover it, and that Keycloak's documented `"+"` shorthand would
+>       work -- it didn't, in this version).
+> - [ ] Phase 3 — BFF permission enforcement (replace
+>       `require_session_role()`'s role bridge with real
+>       `get_permissions()` checks; button visibility to match)
+> - [ ] Phase 4 — cleanup (mock_auth.py already gone; update
+>       CLAUDE.md/README.md for Phase 3's changes once it lands)
 
 ## Context
 

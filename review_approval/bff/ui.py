@@ -1,11 +1,13 @@
 """
-POC HTMX UI. Uses mock_auth.py (session cookie, no password) instead of
-the Keycloak JWT auth that api/auth.py provides for the JSON API. Both
-front doors call the same workflow/service.py functions, so business
-rules (ownership checks, status checks, payload validation) live in one
-place.
+POC HTMX UI. Uses keycloak_session.py (real Keycloak Authorization Code
+login) for session auth. Both front doors call the same
+workflow/service.py functions, so business rules (ownership checks,
+status checks, payload validation) live in one place.
 
-NOT for production use as-is -- see mock_auth.py's docstring.
+Route-level authorization here is still require_session_role()'s
+Phase 2 role bridge, not real permission checks -- see
+keycloak_session.py's docstring and keycloak/INTEGRATION_PLAN.md
+(Phase 3).
 """
 
 import json
@@ -16,7 +18,13 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from review_approval.bff.mock_auth import login, logout, require_session_role
+from review_approval.bff.keycloak_session import (
+    build_authorize_url,
+    complete_login,
+    logout,
+    logout_redirect_url,
+    require_session_role,
+)
 from review_approval.workflow import service
 from review_approval.workflow.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
@@ -70,22 +78,28 @@ def _parse_payload_or_none(payload_json: str) -> Any:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return _render(request, "login.html", {})
+    return _render(request, "login.html", {"authorize_url": build_authorize_url(request)})
 
 
-@router.post("/login")
-async def login_submit(request: Request, username: str = Form(...), role: str = Form(...)):
+@router.get("/callback")
+async def auth_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    if error:
+        return _render(request, "login.html", {"error": f"Keycloak login failed: {error}", "authorize_url": build_authorize_url(request)}, 400)
+    if not code or not state:
+        return _render(request, "login.html", {"error": "Missing code/state from Keycloak.", "authorize_url": build_authorize_url(request)}, 400)
     try:
-        login(request, username, role)
+        await complete_login(request, code, state)
     except ValueError as e:
-        return _render(request, "login.html", {"error": str(e), "username": username}, 400)
+        return _render(request, "login.html", {"error": str(e), "authorize_url": build_authorize_url(request)}, 400)
+    role = request.session["user"]["role"]
     return RedirectResponse(url=f"/ui/{role}", status_code=303)
 
 
 @router.post("/logout")
 async def logout_submit(request: Request):
+    redirect_url = logout_redirect_url(request)
     logout(request)
-    return RedirectResponse(url="/ui/login", status_code=303)
+    return RedirectResponse(url=redirect_url, status_code=303)
 
 
 # ------------------------------------------------------------- operator ----

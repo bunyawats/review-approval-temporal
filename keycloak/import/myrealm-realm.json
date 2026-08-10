@@ -27,8 +27,14 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["*"],
-      "webOrigins": ["*"],
+      "redirectUris": [
+        "http://localhost:8000/ui/callback",
+        "http://bff:8000/ui/callback"
+      ],
+      "webOrigins": ["http://localhost:8000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8000/ui/login##http://bff:8000/ui/login"
+      },
       "authorizationServicesEnabled": true,
       "authorizationSettings": {
         "allowRemoteResourceManagement": true,

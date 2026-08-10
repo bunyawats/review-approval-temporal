@@ -24,9 +24,9 @@ review-approval/
     ├── api/                 # JSON REST surface (real Keycloak auth)
     │   ├── routes.py
     │   └── auth.py
-    └── bff/                 # HTMX UI (mock auth) + sandbox
+    └── bff/                 # HTMX UI (real Keycloak session auth) + sandbox
         ├── ui.py
-        ├── mock_auth.py
+        ├── keycloak_session.py
         ├── sandbox.py       # /sandbox/* -- standalone htmx experiments
         └── templates/       # Jinja2/HTMX templates, Tailwind via CDN
 ```
@@ -53,8 +53,8 @@ module imports every other module by its real package path.
 - **`workflow/service.py`** — shared business logic (ownership checks,
   status checks, starts/signals workflows). Neither front door talks to
   Temporal or Postgres directly — only this module does, which is what
-  keeps `bff/` (mock auth) and `api/` (real Keycloak auth) from drifting
-  out of sync on what's actually allowed.
+  keeps `bff/` and `api/` from drifting out of sync on what's actually
+  allowed.
 - **`api/`** — the JSON REST surface. Validates Keycloak JWTs, enforces
   fine-grained permissions (`Create_Request`, `Update_Request`,
   `Cancel_Request`, `Approve_Request`, `Reject_Request`) rather than
@@ -62,9 +62,12 @@ module imports every other module by its real package path.
   concept of roles or permissions — this is the sole enforcement point
   for that front door. See the Keycloak setup section below for how
   `Operator`/`Manager` map onto these permissions.
-- **`bff/`** — the server-rendered HTMX UI (mock session auth, POC only)
-  plus `/sandbox/*`, a standalone playground for htmx experiments (no
-  auth, no Temporal/Postgres).
+- **`bff/`** — the server-rendered HTMX UI, real Keycloak login
+  (Authorization Code flow — see `keycloak/INTEGRATION_PLAN.md`; route-
+  level authorization there is still a role bridge, not real permission
+  checks like `api/`'s, tracked as that plan's Phase 3) plus
+  `/sandbox/*`, a standalone playground for htmx experiments (no auth,
+  no Temporal/Postgres).
 - **`app.py`** — assembles the actual FastAPI app: lifespan (Temporal
   client + Postgres pool), session middleware, and mounts all three
   routers (`bff.ui`, `bff.sandbox`, `api.routes`).
@@ -88,8 +91,9 @@ docker compose up --build
 This starts everything: Postgres (with two databases — one for Temporal's
 own persistence, one for the app, auto-created by `db/init/*.sh`), the
 Temporal Service + Web UI, two worker services (`worker-workflow`,
-`worker-activity`), and the `bff`. No Keycloak, no manual `createdb`, no
-manual `pip install`.
+`worker-activity`), Keycloak (realm auto-imported, see the Keycloak
+section below), and the `bff`. No manual `createdb`, no manual
+`pip install`, no manual Keycloak setup.
 
 Scale worker capacity for a rough local HA test:
 
@@ -97,14 +101,16 @@ Scale worker capacity for a rough local HA test:
 docker compose up --build --scale worker-activity=3
 ```
 
-- App / UI: **http://localhost:8000** (redirects to `/ui/login`)
+- App / UI: **http://localhost:8000** (redirects to `/ui/login`, real
+  Keycloak login)
 - Temporal Web UI: **http://localhost:8233**
+- Keycloak admin console: **http://localhost:8080** (`admin`/`admin`)
 - Postgres: `localhost:5432` (`temporal`/`temporal`, databases `temporal`
   and `review_approval`)
 
-`KEYCLOAK_ISSUER` is left unset in `docker-compose.yml` — the JSON API's
-Keycloak-protected routes return a 503 if called, but `/ui/*` (mock auth)
-works fully without it.
+Only `keycloak` alone is commonly run this way while everything else
+runs natively — see "Running locally" in `CLAUDE.md` for that hybrid
+setup (`docker compose up -d keycloak`, nothing else).
 
 To rebuild after code changes: `docker compose up --build`. To reset the
 database: `docker compose down -v`.
@@ -130,16 +136,15 @@ temporal server start-dev
 Starts the Temporal Service on `localhost:7233` and the Web UI at
 `http://localhost:8233`.
 
-#### 3. Keycloak (optional — only needed for the JSON API, not `/ui/*`)
+#### 3. Keycloak (required for both `/ui/*` and the JSON API)
 
-> **Note:** the realm/resources/policies/permissions/users described
-> below are real, provisioned, and verified end to end (see below) —
-> but `api/auth.py`/`api/routes.py` haven't been updated to check them
-> yet, so calls will currently get a `403 requires role: operator`/
-> `manager` (a stale, case-sensitive check against the old lowercase
-> role names) even with a perfectly valid token. See `CLAUDE.md`'s
-> "Known gaps" for status — this isn't a small gap, since the five
-> permissions are Resources now, not roles, so a real fix needs a UMA
+> **Note:** `api/` (REST) fully enforces the permissions described
+> below. `/ui/*` has real Keycloak login but still gates routes with a
+> simpler role check, not real permission checks yet — see
+> `keycloak/INTEGRATION_PLAN.md`'s status tracker. This gap doesn't
+> affect logging in or using the app day to day; it's about how fine-grained
+> `/ui/*`'s enforcement is under the hood. For historical context: the
+> permissions below are Resources, not roles, so checking one needs a UMA
 > ticket exchange, not just fixing the string being checked.
 
 Run Keycloak in Docker (works fine standalone, without the rest of
@@ -235,14 +240,16 @@ uvicorn review_approval.app:app --reload --port 8000
 
 </details>
 
-## POC UI (HTMX, mock auth)
+## POC UI (HTMX, real Keycloak login)
 
 Whichever setup option you used, the UI lives at `/ui/*`, in the same
-FastAPI app as the JSON API.
+FastAPI app as the JSON API. Requires Keycloak up (see the Keycloak
+setup section above) — unlike the JSON API, `/ui/*` isn't usable
+without it.
 
-Open **http://localhost:8000** — it redirects to a mock login screen with
-four one-click buttons (Operator One, Operator Two, Manager One, Manager
-Two) — no password, no username entry, just a plain session cookie.
+Open **http://localhost:8000** — it redirects to a login screen with a
+"Log in with Keycloak" link. Use any of the four demo users
+(`operator1`/`operator2`/`manager1`/`manager2`, password `password`).
 
 - **Operator screen** (`/ui/operator`) — shows only *your* requests. "+ New
   Request" opens a dialog to pick a review type and paste a JSON payload.
@@ -255,10 +262,10 @@ Two) — no password, no username entry, just a plain session cookie.
 Both screens poll every 5 seconds so a Manager's decision shows up on the
 Operator's screen (and vice versa) without a manual refresh.
 
-The UI calls `review_approval/workflow/service.py` directly with its own
-mock session rather than going through the Keycloak-protected JSON API —
-both front doors funnel through the same `service.py` functions, so
-there's one source of truth for what's allowed.
+The UI calls `review_approval/workflow/service.py` directly (not the
+JSON API) after establishing its own Keycloak-backed session — both
+front doors funnel through the same `service.py` functions, so there's
+one source of truth for what's allowed.
 
 ## htmx sandbox
 
@@ -355,9 +362,12 @@ simple.
 - `docker-compose.yml` is for **local dev only** — it's not the
   Kubernetes deployment shape. See `CLAUDE.md`'s Kubernetes section for
   the production topology.
-- `review_approval/bff/mock_auth.py` and the `/ui/*` routes are POC-only
-  — no password, no identity verification. Replace with a real
-  Keycloak-backed session before this goes anywhere beyond a local demo.
+- `/ui/*` now has real Keycloak login (`review_approval/bff/keycloak_session.py`),
+  but its route-level authorization is still a role bridge
+  (`require_session_role()`), not real permission checks like the REST
+  API's — see `keycloak/INTEGRATION_PLAN.md`. No access-token refresh
+  either (a 5-minute-old session just forces re-login). Both are
+  tracked, in-progress simplifications, not silent gaps.
 - `verify_aud=False` in `review_approval/api/auth.py` — set and verify a
   real audience once the Keycloak client is configured.
 - No timeout on "wait for Manager decision" — consider adding a
