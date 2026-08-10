@@ -101,18 +101,35 @@ services:
     depends_on:
       - temporal
       - postgres
+      - keycloak
     environment:
       DATABASE_URL: postgresql://temporal:temporal@postgres:5432/review_approval
       TEMPORAL_HOST: temporal:7233
       TEMPORAL_NAMESPACE: default
-      # Intentionally left unset for now -- the JSON API's Keycloak-
-      # protected routes will 503 if called, but /ui/* (mock auth) works
-      # fine without it. Set this once Keycloak is actually stood up.
-      # KEYCLOAK_ISSUER: http://keycloak:8080/realms/myrealm
+      # KEYCLOAK_ISSUER is read lazily (see api/auth.py) -- the JSON API's
+      # protected routes just 503 if Keycloak isn't actually reachable yet
+      # when called, so this doesn't need to block bff's own startup.
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/myrealm
       UI_SESSION_SECRET: local-compose-dev-secret
     ports:
       - "8000:8000"
     restart: on-failure
+
+  # Local dev only -- start-dev mode (in-memory H2, no HTTPS). Realm,
+  # roles, and demo users are declared in keycloak/import/*.json and
+  # loaded automatically on every startup via --import-realm; edit that
+  # file and restart the container to change them, don't click through
+  # the admin console for anything that should survive a restart.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+    ports:
+      - "8080:8080"
 
 volumes:
   pg_data:

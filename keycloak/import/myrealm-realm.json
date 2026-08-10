@@ -1,0 +1,198 @@
+{
+  "realm": "myrealm",
+  "enabled": true,
+  "sslRequired": "none",
+  "roles": {
+    "realm": [
+      {
+        "name": "Operator",
+        "description": "Creates and manages their own review requests.",
+        "composite": false
+      },
+      {
+        "name": "Manager",
+        "description": "Approves or rejects pending review requests.",
+        "composite": false
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "review-approval",
+      "name": "Review Approval API",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "dev-secret-change-me",
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "authorizationServicesEnabled": true,
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "UNANIMOUS",
+        "resources": [
+          {
+            "name": "Create_Request",
+            "displayName": "Create Request",
+            "ownerManagedAccess": false
+          },
+          {
+            "name": "Update_Request",
+            "displayName": "Update Request",
+            "ownerManagedAccess": false
+          },
+          {
+            "name": "Cancel_Request",
+            "displayName": "Cancel Request",
+            "ownerManagedAccess": false
+          },
+          {
+            "name": "Approve_Request",
+            "displayName": "Approve Request",
+            "ownerManagedAccess": false
+          },
+          {
+            "name": "Reject_Request",
+            "displayName": "Reject Request",
+            "ownerManagedAccess": false
+          }
+        ],
+        "policies": [
+          {
+            "name": "Operator Policy",
+            "description": "Requires the Operator realm role.",
+            "type": "role",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "roles": "[{\"id\":\"Operator\",\"required\":true}]"
+            }
+          },
+          {
+            "name": "Manager Policy",
+            "description": "Requires the Manager realm role.",
+            "type": "role",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "roles": "[{\"id\":\"Manager\",\"required\":true}]"
+            }
+          },
+          {
+            "name": "Create_Request Permission",
+            "description": "Operator role may create requests.",
+            "type": "resource",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"Create_Request\"]",
+              "applyPolicies": "[\"Operator Policy\"]"
+            }
+          },
+          {
+            "name": "Update_Request Permission",
+            "description": "Operator role may update requests.",
+            "type": "resource",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"Update_Request\"]",
+              "applyPolicies": "[\"Operator Policy\"]"
+            }
+          },
+          {
+            "name": "Cancel_Request Permission",
+            "description": "Operator role may cancel requests.",
+            "type": "resource",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"Cancel_Request\"]",
+              "applyPolicies": "[\"Operator Policy\"]"
+            }
+          },
+          {
+            "name": "Approve_Request Permission",
+            "description": "Manager role may approve requests.",
+            "type": "resource",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"Approve_Request\"]",
+              "applyPolicies": "[\"Manager Policy\"]"
+            }
+          },
+          {
+            "name": "Reject_Request Permission",
+            "description": "Manager role may reject requests.",
+            "type": "resource",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"Reject_Request\"]",
+              "applyPolicies": "[\"Manager Policy\"]"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "operator1",
+      "firstName": "Operator",
+      "lastName": "One",
+      "email": "operator1@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Operator", "default-roles-myrealm"]
+    },
+    {
+      "username": "operator2",
+      "firstName": "Operator",
+      "lastName": "Two",
+      "email": "operator2@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Operator", "default-roles-myrealm"]
+    },
+    {
+      "username": "manager1",
+      "firstName": "Manager",
+      "lastName": "One",
+      "email": "manager1@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Manager", "default-roles-myrealm"]
+    },
+    {
+      "username": "manager2",
+      "firstName": "Manager",
+      "lastName": "Two",
+      "email": "manager2@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Manager", "default-roles-myrealm"]
+    }
+  ]
+}

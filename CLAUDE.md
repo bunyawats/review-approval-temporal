@@ -155,28 +155,29 @@ or `bff/` respectively; don't put front-door-specific logic in
   dependency (`require_permission(permission: str)`) for the JSON API —
   not a role check. Temporal has zero concept of roles or permissions;
   this is the sole enforcement point for this front door.
-  **The app checks permissions, never role names.** Five fine-grained
-  permissions exist as plain Keycloak realm roles: `Create_Request`,
-  `Update_Request`, `Cancel_Request` (Operator's), `Approve_Request`,
-  `Reject_Request` (Manager's). `Operator` and `Manager` are themselves
-  realm roles too, but **composite** ones — each just bundles the
-  relevant permission roles as members; Keycloak auto-expands composite
-  membership into the token's `realm_access.roles` claim, so a user
-  holding `Operator` and a user granted its three permissions directly
-  are indistinguishable to this app. `require_permission()` only ever
-  checks for a specific permission string in that claim — it never
-  checks for `Operator`/`Manager` by name, and doesn't know they exist.
-  **This is what makes adding a new role a Keycloak-only config
-  change**: a future `Auditor` role that can create and cancel requests
-  but not approve/reject is just a new composite realm role bundling
-  `Create_Request` + `Cancel_Request` in Keycloak's admin console — no
-  code here changes, since none of it ever referenced `Operator`/
-  `Manager` as concepts. `KEYCLOAK_ISSUER` is read lazily, on first
-  actual call to a protected route, not at import time, so the app
-  (including `/ui/*`, which has its own separate, unrelated
-  `require_session_role()` check against the mock-auth session cookie —
-  this permission model is API-only) runs fully without Keycloak
-  configured at all.
+  Uses Keycloak's Authorization Services (Resources/Policies/Permissions
+  — see the `keycloak-admin` skill for the general mechanism, JSON
+  shape, and UMA ticket exchange details), not composite roles:
+  `Operator`/`Manager` are plain realm roles; the five permissions
+  (`Create_Request`, `Update_Request`, `Cancel_Request`,
+  `Approve_Request`, `Reject_Request`) are Resources on the
+  `review-approval` client, gated by role-based Policies (`Operator
+  Policy`/`Manager Policy`) via matching Permissions — see the
+  `keycloak` bullet below for this project's exact structure.
+  **Consequence worth remembering when implementing
+  `require_permission()`**: since the five permissions are Resources,
+  not roles, they never appear in the plain access token's
+  `realm_access.roles` claim — checking one needs a real UMA ticket
+  exchange (a second Keycloak call, or a cached RPT), not just decoding
+  a different claim from the same token. Adding a new role (e.g.
+  `Auditor`) stays a pure Keycloak config change either way: new role +
+  new Policy + add that Policy to the relevant Permissions'
+  `applyPolicies` — no code here ever references role names, only
+  Resource names. `KEYCLOAK_ISSUER` is read lazily, on first actual call
+  to a protected route, not at import time, so the app (including
+  `/ui/*`, which has its own separate, unrelated `require_session_role()`
+  check against the mock-auth session cookie — this permission model is
+  API-only) runs fully without Keycloak configured at all.
 - **`bff/mock_auth.py`** — session-cookie auth for the **POC UI only**
   (`bff/ui.py`). No password, no identity check — trusts whatever role
   the login form submitted. Never use for the JSON API. Swap-out path to
@@ -190,56 +191,35 @@ or `bff/` respectively; don't put front-door-specific logic in
   `_cancel_dialog.html` for Cancel, `_detail_dialog.html` for
   View/Review/Approve/Reject).
   **Every mutating action (Save, Cancel, Approve, Reject) follows the
-  same confirm-dialog → close-immediately → spin-on-row-button
-  sequence.** Opening the dialog (Edit/Cancel/Review buttons, plain
-  `hx-get` into `#dialog-container`) is meant to feel instant — no
-  artificial delay on that GET. The dialog's confirm button (Save /
-  Confirm Cancel / Approve / Reject) is `type="button"`, not a form
-  submit: its `onclick` reads whatever it needs from the dialog's own
-  inputs into JS variables *first*, then clears `#dialog-container`'s
-  `innerHTML` (closing the dialog client-side, before the request is even
-  sent), then fires the actual mutation via `htmx.ajax()` — with `source`
-  pointing at the **row's own stable-id action button**
-  (`edit-btn-{request_id}`, `cancel-btn-{request_id}`,
-  `review-btn-{request_id}`, each carrying its own `hx-indicator` span),
-  not `this`, since the dialog element that would otherwise be `this` no
-  longer exists by the time the response comes back. `target` is
-  `#row-{request_id}`; `select: 'tr'` is required (see the
-  `_operator_row_response.html`/`_manager_row_response.html` bullet below
-  for why); `swap: 'outerHTML swap:400ms'` — the 400ms is a
-  **perceptibility floor, not a correctness mechanism**: `_wait_until()`
-  (below) already guarantees the response is the confirmed final state,
-  but a real local round trip can be as fast as 60-90ms, too fast for a
-  human to perceive the indicator's fade or its spin completing a visible
-  rotation at all (see the `htmx4` skill's "Making a real round trip
-  actually perceptible" section for the two independent CSS fixes this
-  needed beyond just the delay). Create is the one exception still using
-  a plain declarative form submit (`hx-post` on the `<form>` itself,
-  swapping the whole `#request-list`) because there's no existing row to
-  attach a `source` element to yet before the create succeeds; its
-  spinner is the "+ New Request" button itself, and that button needs an
-  *explicit* `hx-indicator="#create-spinner"` — omitting it means
-  `.htmx-request` lands on the button rather than the spinner span (htmx
-  falls back to the triggering element itself as the indicator when none
-  is given), which still shows the spinner via htmx's own descendant CSS
-  selector but silently skips the instant-show fix described below, since
-  that fix's selector requires `.htmx-request` on the *same* element as
-  the spinner.
+  same pattern**: dialog opens instantly (plain `hx-get`, no artificial
+  delay), its confirm button (`type="button"`, not a form submit) reads
+  whatever it needs from the dialog's own inputs into JS variables
+  *first*, clears `#dialog-container`'s `innerHTML` (closing it
+  client-side before the request is even sent), then fires the mutation
+  via `htmx.ajax()` — `source` points at the **row's own stable-id
+  action button** (`edit-btn-{request_id}`, `cancel-btn-{request_id}`,
+  `review-btn-{request_id}`, each with its own `hx-indicator` span), not
+  `this`, since the dialog element is already gone by the time the
+  response arrives. `target` is `#row-{request_id}`, `select: 'tr'` is
+  required (see the `_operator_row.html` bullet below), `swap:
+  'outerHTML swap:400ms'` — the 400ms is a **perceptibility floor, not a
+  correctness mechanism** (`_wait_until()` below already guarantees the
+  response is confirmed-final; a real round trip is just too fast,
+  60-90ms, to see happen otherwise — see the `htmx4` skill's "Making a
+  real round trip actually perceptible" section). Create is the one
+  exception, still a plain declarative form submit swapping the whole
+  `#request-list` (no row exists yet to attach `source` to); its button
+  needs an *explicit* `hx-indicator="#create-spinner"` — see the `htmx4`
+  skill for why omitting it would matter.
 
-  Every mutating route's *error* path needs to land back in the dialog,
-  which no longer matches the row-scoped `target`/`source` those requests
-  were fired with — those responses carry `_RETARGET_DIALOG_HEADERS`
-  (`HX-Retarget: #dialog-container`, `HX-Reswap: innerHTML`, **and
-  `HX-Reselect: #dialog-root`**). The `HX-Reselect` is not optional: the
-  triggering action's `htmx.ajax()` call already set `select: 'tr'`, and
-  per the real v4 bundle that selection filter is still in effect for
-  *any* response to that request — including an error response, which
-  has no `<tr>` in it at all. Without `HX-Reselect` resetting the filter,
-  an error would silently render a blank dialog instead of the validation
-  message, rather than erroring loudly. `#dialog-root` is the id every
-  dialog fragment's own outer wrapper `<div>` carries, present in
-  `_form_dialog.html`, `_cancel_dialog.html`, and `_detail_dialog.html`
-  alike, specifically so this reselect target is stable across all three.
+  Every mutating route's *error* path retargets to the dialog via
+  `_RETARGET_DIALOG_HEADERS` (`HX-Retarget`/`HX-Reswap`/`HX-Reselect` —
+  the last one needed because the triggering request's `select: 'tr'`
+  would otherwise still apply and blank the error dialog; see the
+  `htmx4` skill's `<tr>`/`HX-Reselect` section for why). `#dialog-root`
+  is the id every dialog fragment's own outer wrapper carries
+  (`_form_dialog.html`, `_cancel_dialog.html`, `_detail_dialog.html`),
+  so this reselect target is stable across all three.
 - **`bff/templates/`** — Jinja2 templates. `base.html` is the shell;
   `_*.html` are HTMX fragments, not full pages. This project's Starlette
   version requires **`TemplateResponse(request, name, context)`**
@@ -255,69 +235,34 @@ or `bff/` respectively; don't put front-door-specific logic in
   `templates/sandbox/` are included too); new `.html` files need no
   config change, other asset types would.
   **Deliberately tracks the latest major of both htmx and Tailwind** —
-  `base.html` pins **htmx 4.x beta** (`https://unpkg.com/htmx.org@4.0.0-beta6`)
-  and **Tailwind v4** via
-  `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4` — *not*
-  `cdn.tailwindcss.com` (the old "Play CDN"), which only ever serves
-  Tailwind v3 and was never updated for v4. `@tailwindcss/browser` is
-  Tailwind's own v4-era replacement: same script-tag, no-build-step,
-  scans-the-DOM-at-runtime behavior, just published under a different
-  package. **htmx 4 is pre-release** (npm's `latest` dist-tag still
-  points at 2.0.10; 4.x only exists under the `next` tag and is still
-  moving between betas) — re-check this pin against
-  `npm view htmx.org dist-tags` periodically and bump to a newer beta or
-  the eventual stable release; don't assume beta6's behavior is final.
-  When bumping either library, re-pin to the new exact version (don't
-  leave it floating) and re-verify against the actual downloaded bundle,
-  not just changelog prose — htmx 4's docs site describes some changes
-  imprecisely (e.g. it renamed swap-related events to colon-separated
-  names like `htmx:after:swap`, confirmed by grepping the real bundle
-  for `htmx:` string literals, not by trusting the docs alone). Known
-  v4 changes relevant here: `htmx.config.allowScriptTags` was removed
-  as a *setting*, but the behavior it used to gate (creating a fresh
-  `<script>` element to force execution of inline `<script>` tags in
-  swapped content) is now unconditional — so `_form_dialog.html`'s
-  inline `<script>` (the sample-payload auto-fill) still works, now
-  without an escape hatch to disable it. `htmx.ajax(method, url, ctx)`
-  keeps the same signature this codebase relies on — used directly by
-  every dialog's confirm button (`_form_dialog.html`'s Save,
-  `_cancel_dialog.html`'s Confirm Cancel, `_detail_dialog.html`'s
-  Approve/Reject) for the close-dialog-then-fire-in-background pattern
-  described in the `bff/ui.py` bullet above, since a declarative
-  `hx-post` can't express "close this dialog and use a *different*
-  element as the request's source." All requests now go
-  through `fetch()` instead of `XMLHttpRequest`; harmless here since no
-  backend route inspects `HX-*` request headers. Tailwind v4 renamed
-  the unsuffixed tier of a few scales (`shadow`→`shadow-sm`, old
-  `shadow-sm`→`shadow-xs`, same pattern for `rounded`/`blur`) and
-  changed the default `border` color from `gray-200` to `currentColor`.
-  This codebase only uses suffixed variants (`rounded-md`, `rounded-xl`,
-  etc.) and always pairs `border`/`border-b` with an explicit color
-  class, so it isn't affected today, but a future utility-class addition
-  could be — grep for bare `border`, `rounded`, `shadow`, or `blur` with
-  no suffix before assuming it's still safe.
-  Every spinner carries Tailwind's `transition-opacity duration-200`
-  **unconditionally**, not gated behind `.htmx-request`, so the *hide*
-  direction fades instead of cutting off instantly (htmx's own injected
-  CSS only puts a `transition` on the active/show rule — see the `htmx4`
-  skill's base "Loading indicators and swap timing" section). Layered on
-  top of that, every spinner also carries
-  `[&.htmx-request]:!duration-0` — a same-element conditional override
-  that forces the *show* direction to be instant instead of taking the
-  full 200ms — and `[animation-duration:.3s]` alongside `animate-spin` to
-  speed up the rotation itself (Tailwind's default is 1000ms/turn, too
-  slow to read as motion in a sub-100ms window). See the `htmx4` skill's
-  "Making a real round trip actually perceptible" section for why both
-  of these are needed together, and its "Loading indicators: which
-  pattern to use, by whether a stable element exists" section for the
-  close-dialog-then-target-a-stable-row-button architecture this whole
-  bullet describes. `/sandbox/hx-indicator/` predates and proved out only
-  the *base* indicator mechanism (the four simpler cases there, plus the
-  MutationObserver timing harness at `/sandbox/hx-indicator/timing`) —
-  it hasn't been updated to demonstrate the instant-show/fast-spin/
-  close-dialog-first refinements layered on top since, so treat it as a
-  historical record of the mechanism, not a live mirror of the current
-  production pattern.
+  pinned to **htmx 4.x beta** (`https://unpkg.com/htmx.org@4.0.0-beta6`)
+  and **Tailwind v4** via `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4`
+  — *not* `cdn.tailwindcss.com` (the old Play CDN, permanently stuck on
+  v3). See the `htmx4` skill for what actually changed in v4 vs 2.x, how
+  to re-verify a version bump against the real bundle rather than
+  changelog prose, and the general loading-indicator/swap-timing
+  mechanics referenced throughout this file. Two things this project
+  specifically depends on from that skill's "verified changes" list:
+  `_form_dialog.html`'s inline `<script>` (sample-payload auto-fill)
+  relies on v4's now-unconditional script execution on swap, and every
+  dialog's confirm button uses `htmx.ajax()` rather than declarative
+  `hx-post`, specifically to get the close-dialog-then-fire-elsewhere
+  pattern described in the `bff/ui.py` bullet above (a declarative
+  `hx-post` can't express "use a *different* element as the source").
+  Tailwind v4's `shadow`/`rounded`/`blur` scale renames and `border`
+  default-color change don't affect this codebase today (only suffixed
+  variants used, `border`/`border-b` always paired with an explicit
+  color) — grep for bare `border`/`rounded`/`shadow`/`blur` before
+  assuming a new utility addition is still safe.
+  Every spinner carries `transition-opacity duration-200` unconditionally
+  (smooth *hide*), `[&.htmx-request]:!duration-0` (instant *show*), and
+  `[animation-duration:.3s]` alongside `animate-spin` (Tailwind's default
+  1000ms/turn doesn't read as motion in a sub-100ms window) — see the
+  `htmx4` skill's "Making a real round trip actually perceptible"
+  section for why all three are needed together.
+  `/sandbox/hx-indicator/` predates these refinements — treat it as a
+  historical record of the base mechanism, not a live mirror of the
+  current pattern.
 - **`bff/templates/_operator_row.html`, `_manager_row.html`** — each
   defines one Jinja `{% macro %}` rendering a single `<tr id="row-
   {request_id}">`, including that row's action button(s) with their
@@ -331,15 +276,13 @@ or `bff/` respectively; don't put front-door-specific logic in
   apart on markup. Extending a row (new column, new action button) means
   editing the macro once, not both list templates.
   **The single-row response templates wrap the macro's `<tr>` output in
-  a real `<table><tbody>...</tbody></table>`** — a bare `<tr>` outside
-  table context gets its own tags silently stripped by the browser's
-  HTML parser on swap, leaving its cell contents as loose children of
-  whatever `<tbody>` it lands in (see the `htmx4` skill's "Swapping
-  `<tr>`/`<td>` fragments outside a `<table>` context" section for the
-  full mechanism — this was a real, reproduced-and-fixed bug, not a
-  theoretical concern). The `select: 'tr'` on every caller's
-  `htmx.ajax()` (see the `bff/ui.py` bullet above) is what pulls the
-  correctly-parsed `<tr>` back out of that wrapper for the actual swap.
+  a real `<table><tbody>...</tbody></table>`** — required because a bare
+  `<tr>` swapped outside table context gets its tags silently stripped
+  by the browser (a real, reproduced-and-fixed bug here — see the
+  `htmx4` skill's "Swapping `<tr>`/`<td>` fragments" section for the
+  full mechanism). `select: 'tr'` on every caller's `htmx.ajax()` (see
+  `bff/ui.py` above) is what pulls the correctly-parsed `<tr>` back out
+  of that wrapper for the actual swap.
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
   away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
@@ -435,9 +378,40 @@ only** — not a preview of the Kubernetes shape below.
   first container start). Editing `db/schema.sql` doesn't affect existing
   containers — `docker compose down -v` to drop the volume and re-run
   init scripts.
-- `KEYCLOAK_ISSUER` is deliberately unset in `docker-compose.yml` — the
-  JSON API's protected routes 503 if called, `/ui/*` works fully without
-  it. Don't add a Keycloak service without checking with the user first.
+- **`keycloak`** — `quay.io/keycloak/keycloak:26.0`, `start-dev
+  --import-realm`, admin console (`admin`/`admin`) at port `8080`,
+  published to the host. Realm defined declaratively in
+  **`keycloak/import/myrealm-realm.json`** (mounted read-only into
+  `/opt/keycloak/data/import`) — the single source of truth; edit it and
+  recreate the container (`docker compose down -v keycloak && docker
+  compose up -d keycloak`, **not** `restart` — see the `keycloak-admin`
+  skill for why a plain restart silently skips re-importing). That skill
+  covers the general Docker/realm-import/Authorization-Services
+  mechanics; this bullet is just what's specific to this project:
+  - 2 plain (non-composite) realm roles: `Operator`, `Manager`
+  - 5 Resources on the `review-approval` client: `Create_Request`,
+    `Update_Request`, `Cancel_Request`, `Approve_Request`,
+    `Reject_Request`
+  - 2 role-based Policies (`Operator Policy`/`Manager Policy`) and 5
+    Permissions binding each Resource to the right one — Create/Update/
+    Cancel via Operator, Approve/Reject via Manager
+  - `review-approval` is a confidential client, `secret:
+    dev-secret-change-me` (fine for `start-dev`-only local dev, plainly
+    checked into the JSON — never do this anywhere real)
+  - 4 demo users, password `password`: `operator1`/`operator2` →
+    `Operator`, `manager1`/`manager2` → `Manager`
+  Verified end to end, not just configured: a real UMA ticket exchange
+  for `operator1` returns exactly `Create_Request`/`Update_Request`/
+  `Cancel_Request`, `manager1` exactly `Approve_Request`/`Reject_Request`
+  — and a real token clears JWT signature/issuer validation against this
+  instance fine (confirmed via `bff`'s actual `403 requires role:
+  operator` response — wrong, stale role-name check, not an auth
+  failure; see "Known gaps"). `keycloak/list-permissions-by-role.sh`
+  audits the live Policy→Permission→Resource config from the command
+  line (a filled-in version of the `keycloak-admin` skill's general
+  script).
+  **The 4 core app services are commonly run natively instead**, with
+  only `keycloak` in Docker — see "Running locally" below.
 
 ## Deployment target: Kubernetes
 
@@ -479,15 +453,21 @@ only** — not a preview of the Kubernetes shape below.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
-- **The permission-based authorization design documented in the
-  `api/auth.py`/`api/routes.py` bullets above is not implemented yet.**
-  `require_role("operator")`/`require_role("manager")` are still the
-  actual checks in code today; `require_permission()` doesn't exist.
-  Keycloak itself also has zero provisioning anywhere in this repo (no
-  realm export, no `docker-compose.yml` service, no composite-role
-  setup) — the README's Keycloak setup section still describes the
-  simpler two-realm-role version. This is the next implementation step,
-  not yet done.
+- **The permission-based authorization design in the `api/auth.py`
+  bullet above is only half done.** Keycloak itself is fully provisioned
+  and verified (see the `keycloak` bullet). The **application code
+  hasn't caught up at all**: `api/auth.py`/`api/routes.py` still check
+  `require_role("operator")`/`require_role("manager")` against the plain
+  JWT's `realm_access.roles` claim — `require_permission()` doesn't
+  exist, and implementing it now needs a real UMA ticket exchange (see
+  the `keycloak-admin` skill), not just fixing the string being checked,
+  since the five permissions are Resources now and never appear in that
+  claim at all. Confirmed live: a real, validly-signed token for
+  `operator1` gets `403 requires role: operator` calling `POST /reviews`
+  — the JWT itself checks out fine (the stale lowercase role check would
+  even pass today, since `Operator` is still a real role, just
+  wrong-cased) — only the intended permission check is entirely unbuilt.
+  Next implementation step.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
 - `bff/mock_auth.py` / `/ui/*` have no real authentication — see its
@@ -509,6 +489,20 @@ uvicorn review_approval.app:app --reload --port 8000          # separate termina
 
 Requires `pip install -e .` first, and `DATABASE_URL` set (plus
 `KEYCLOAK_ISSUER` only if calling the JSON API) — see `.env.example`.
+
+**Hybrid (the common case in practice): everything above runs natively,
+Keycloak alone runs in Docker** — `docker compose up -d keycloak` (only
+that service starts). `.env`'s
+`KEYCLOAK_ISSUER=http://localhost:8080/realms/myrealm` (the
+`.env.example` default) is already correct for this; it's only a
+*Dockerized* `bff` that needs the Docker-internal `http://keycloak:8080/...`
+form instead (`docker-compose.yml`'s own `bff` service already has it
+right). See the `keycloak-admin` skill's "Docker networking gotchas"
+section for why a natively-run Postgres and a Dockerized one can coexist
+on the same host port without conflict — confirmed true here, but don't
+lean on it; if in doubt, stop whichever instance you're not using
+(`docker compose stop <service>`, or check with `lsof -nP -iTCP:<port>
+-sTCP:LISTEN`).
 
 ## Testing changes
 

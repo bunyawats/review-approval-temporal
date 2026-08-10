@@ -132,36 +132,84 @@ Starts the Temporal Service on `localhost:7233` and the Web UI at
 
 #### 3. Keycloak (optional — only needed for the JSON API, not `/ui/*`)
 
-> **Note:** this describes the target design (permission-based, see
-> `CLAUDE.md`'s `api/auth.py` bullet and its "Known gaps" entry) — the
-> app still checks plain roles today, so this section is not yet
-> reflected in code. Treat it as the spec for the next implementation
-> pass, not current behavior.
+> **Note:** the realm/resources/policies/permissions/users described
+> below are real, provisioned, and verified end to end (see below) —
+> but `api/auth.py`/`api/routes.py` haven't been updated to check them
+> yet, so calls will currently get a `403 requires role: operator`/
+> `manager` (a stale, case-sensitive check against the old lowercase
+> role names) even with a perfectly valid token. See `CLAUDE.md`'s
+> "Known gaps" for status — this isn't a small gap, since the five
+> permissions are Resources now, not roles, so a real fix needs a UMA
+> ticket exchange, not just fixing the string being checked.
 
-The JSON API checks **permissions, not roles**. You'll need a realm with:
+Run Keycloak in Docker (works fine standalone, without the rest of
+`docker-compose.yml`'s services):
 
-- Five fine-grained realm roles, one per permission: `Create_Request`,
-  `Update_Request`, `Cancel_Request`, `Approve_Request`, `Reject_Request`
-- Two **composite** realm roles for convenient assignment: `Operator`
-  (composite of `Create_Request`, `Update_Request`, `Cancel_Request`) and
-  `Manager` (composite of `Approve_Request`, `Reject_Request`) — Keycloak
-  expands composite membership into the token automatically, so a user
-  assigned `Operator` ends up with all three of its permissions in the
-  token's `realm_access.roles` claim, same as if they'd been granted
-  each one individually
-- A client for the BFF
-- Users assigned `Operator` and/or `Manager` (or any subset of the five
-  permission roles directly, for finer-grained access than the two
-  bundles provide)
+```bash
+docker compose up -d keycloak
+```
 
-Adding a new role later (e.g. an `Auditor` who can create and cancel
-requests but not approve/reject) is pure Keycloak admin-console
-config — create a new composite realm role bundling whichever
-permission roles it needs, assign it to users. No application code
-changes, since the app never checks for `Operator`/`Manager`/`Auditor`
-by name, only for the specific permission it needs at each route.
+This imports a ready-made realm from `keycloak/import/myrealm-realm.json`
+automatically on every start — no manual admin-console setup needed.
+Uses Keycloak's **Authorization Services** (Resources + Policies +
+Permissions) rather than plain/composite roles, so that "which role
+grants which action" is its own editable object instead of being baked
+into a role's membership list:
 
-Point `KEYCLOAK_ISSUER` at `http://<host>:<port>/realms/<your-realm>`.
+- Two plain (non-composite) realm roles: `Operator`, `Manager`
+- Five **Resources** on the `review-approval` client, one per action:
+  `Create_Request`, `Update_Request`, `Cancel_Request`,
+  `Approve_Request`, `Reject_Request`
+- Two role-based **Policies** (`Operator Policy`, `Manager Policy`) and
+  five **Permissions** binding each Resource to the right one —
+  Create/Update/Cancel via `Operator Policy`, Approve/Reject via
+  `Manager Policy`
+- `review-approval` is a **confidential** client (`secret:
+  dev-secret-change-me`) — required, since a public client can't have
+  Resources/Policies/Permissions at all
+- Four demo users, password `password` for all: `operator1`/`operator2`
+  (`Operator`), `manager1`/`manager2` (`Manager`)
+
+Adding a new role later (e.g. an `Auditor` who can create and cancel but
+not approve/reject) is pure Keycloak config: new `Auditor` role, new
+`Auditor Policy` requiring it, add that policy to the
+`Create_Request`/`Cancel_Request` Permissions' `applyPolicies`. No
+application code changes. To change the realm's own definition, edit
+`keycloak/import/myrealm-realm.json` and recreate the container
+(`docker compose down -v keycloak && docker compose up -d keycloak`) — a
+plain `restart` reuses the running container's state and silently skips
+re-importing your edit.
+
+Admin console: `http://localhost:8080` (`admin`/`admin`). Get a token to
+test with (note the `client_secret` — see above):
+
+```bash
+curl -s -X POST http://localhost:8080/realms/myrealm/protocol/openid-connect/token \
+  -d "client_id=review-approval" -d "client_secret=dev-secret-change-me" \
+  -d "grant_type=password" -d "username=operator1" -d "password=password"
+```
+
+Checking which permissions a token actually carries requires a second
+call — a **UMA ticket exchange**, trading the access token above for the
+resource-server's own view of what it's allowed to do (this is the part
+`api/auth.py` will need to do once `require_permission()` exists — see
+`CLAUDE.md`'s "Known gaps"):
+
+```bash
+curl -s -X POST http://localhost:8080/realms/myrealm/protocol/openid-connect/token \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:uma-ticket" \
+  -d "audience=review-approval" \
+  -d "client_id=review-approval" -d "client_secret=dev-secret-change-me" \
+  -d "response_mode=permissions"
+# operator1 -> [{"rsname": "Create_Request", ...}, {"rsname": "Update_Request", ...}, {"rsname": "Cancel_Request", ...}]
+```
+
+`KEYCLOAK_ISSUER` in `.env.example` (`http://localhost:8080/realms/myrealm`)
+already matches this out of the box for a natively-run `bff`. If `bff`
+itself runs in Docker instead, it needs the Docker-internal hostname —
+`docker-compose.yml`'s own `bff` service already sets this correctly
+(`http://keycloak:8080/realms/myrealm`).
 
 #### 4. Python environment
 
@@ -225,16 +273,23 @@ instead of eyeballing it.
 
 ## Try it (JSON API)
 
-Requires `KEYCLOAK_ISSUER` set and a real Keycloak realm running — not
-needed for the `/ui/*` screens above.
+Requires `KEYCLOAK_ISSUER` set and a real Keycloak realm running (see
+the Keycloak setup section above) — not needed for the `/ui/*` screens
+above.
+
+`review-approval` is a **confidential** client (has a secret), needed
+for its Authorization Services / Resources+Policies+Permissions setup —
+so token requests need `client_secret` too, unlike a plain public
+client:
 
 ```bash
 TOKEN=$(curl -s -X POST \
   "$KEYCLOAK_ISSUER/protocol/openid-connect/token" \
-  -d "client_id=<your-client>" \
+  -d "client_id=review-approval" \
+  -d "client_secret=dev-secret-change-me" \
   -d "grant_type=password" \
-  -d "username=<operator-user>" \
-  -d "password=<password>" \
+  -d "username=operator1" \
+  -d "password=password" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 ```
 
