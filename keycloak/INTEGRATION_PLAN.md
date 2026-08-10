@@ -32,11 +32,41 @@
 >       explicitly (a wrong assumption that `redirectUris` alone would
 >       cover it, and that Keycloak's documented `"+"` shorthand would
 >       work -- it didn't, in this version).
-> - [ ] Phase 3 — BFF permission enforcement (replace
->       `require_session_role()`'s role bridge with real
->       `get_permissions()` checks; button visibility to match)
-> - [ ] Phase 4 — cleanup (mock_auth.py already gone; update
->       CLAUDE.md/README.md for Phase 3's changes once it lands)
+> - [x] Phase 3 — `bff/keycloak_session.py` gained `check_permission()`/
+>       `require_permission()` (same UMA mechanism as `api/auth.py`,
+>       used alongside `require_session_role()`, not replacing it — see
+>       that module's docstring for why both stay: role gates *screen*
+>       access, permission gates the five *mutating actions*)
+> - [x] Phase 3 — `bff/ui.py` wired: `new_form`/`create_request`,
+>       `edit_form`/`update_request`, `cancel_form`/`cancel_request_route`
+>       use `require_permission()`; `manager_decision` branches
+>       `Approve_Request`/`Reject_Request` via `check_permission()` based
+>       on the submitted decision, same pattern as the REST API's
+>       `submit_decision`
+> - [x] Phase 3 — button visibility reflects real granted permissions,
+>       not just row status: `_operator_row.html` (Edit/Cancel gated
+>       individually), `_manager_row.html` (Review vs. View label gated
+>       by Approve_Request-or-Reject_Request), `_detail_dialog.html`
+>       (Approve/Reject gated individually) — defense in depth alongside
+>       the route-level checks above, not a replacement for them
+> - [x] Phase 3 — integration tests (`tests/integration/test_bff_permissions.py`,
+>       9 tests: operator create/manager-denied, manager-cannot-update/
+>       cancel, operator-cannot-reach-manager-decision, manager
+>       approve/reject, no-session redirect) — verified against the real
+>       local stack, all passing (35/35 across the full suite). **Phase
+>       3 complete.**
+> - [x] Phase 4 — cleanup: `mock_auth.py` already gone (deleted in Phase
+>       2); `CLAUDE.md`/`README.md` updated for Phase 3 (permission
+>       enforcement + button-visibility gating in `bff/`, Known Gaps
+>       trimmed); swept `review_approval/` for leftover `require_role`/
+>       `VALID_ROLES`/stale "mock auth" references — none of the old
+>       role-based model remained, but a few now-inaccurate docstrings/
+>       comments and one user-facing error string (`api/auth.py`) still
+>       described `/ui/*` as mock-auth or Phase-2-in-progress; corrected
+>       (`app.py`, `workflow/service.py`, `api/auth.py`). **Full
+>       Keycloak integration plan complete** — real login, real
+>       permission checks on every route in both front doors, and a
+>       35-test suite (11 unit + 24 integration) covering it end to end.
 
 ## Context
 

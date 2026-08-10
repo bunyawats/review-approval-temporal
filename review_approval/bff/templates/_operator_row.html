@@ -1,10 +1,20 @@
-{% macro operator_row(r) %}
+{% macro operator_row(r, permissions=[]) %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",
   "rejected": "bg-red-100 text-red-800",
   "cancelled": "bg-gray-200 text-gray-700",
 } %}
+{#
+  Buttons reflect this user's *actual* granted permissions, not just
+  the row's status -- defense in depth alongside the route-level
+  require_permission() checks (see bff/ui.py's _user_permissions()).
+  Independently gated (not "pending => both buttons") since a future
+  role could plausibly have one of Update_Request/Cancel_Request
+  without the other.
+#}
+{% set can_edit = r.status == "PENDING_REVIEW" and "Update_Request" in permissions %}
+{% set can_cancel = r.status == "PENDING_REVIEW" and "Cancel_Request" in permissions %}
 <tr id="row-{{ r.id }}">
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
@@ -15,18 +25,21 @@
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm text-gray-500">{{ r.closed_comment or "—" }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm text-gray-500">{{ r.closed_by or "—" }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
-    {% if r.status == "PENDING_REVIEW" %}
+    {% if can_edit %}
     <button id="edit-btn-{{ r.id }}" class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 mr-1.5 disabled:opacity-50"
       hx-get="/ui/operator/{{ r.id }}/edit-form" hx-target="#dialog-container" hx-swap="innerHTML" hx-indicator="#edit-spinner-{{ r.id }}">
       <span id="edit-spinner-{{ r.id }}" class="htmx-indicator transition-opacity duration-200 [&.htmx-request]:!duration-0 w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin [animation-duration:.3s]"></span>
       Edit
     </button>
+    {% endif %}
+    {% if can_cancel %}
     <button id="cancel-btn-{{ r.id }}" class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
       hx-get="/ui/operator/{{ r.id }}/cancel-form" hx-target="#dialog-container" hx-swap="innerHTML" hx-indicator="#cancel-spinner-{{ r.id }}">
       <span id="cancel-spinner-{{ r.id }}" class="htmx-indicator transition-opacity duration-200 [&.htmx-request]:!duration-0 w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin [animation-duration:.3s]"></span>
       Cancel
     </button>
-    {% else %}
+    {% endif %}
+    {% if not can_edit and not can_cancel %}
     <button class="px-2.5 py-1 text-xs font-medium rounded-md bg-blue-100 text-blue-800 hover:bg-blue-200"
       hx-get="/ui/operator/{{ r.id }}/detail" hx-target="#dialog-container" hx-swap="innerHTML">View</button>
     {% endif %}

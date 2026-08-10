@@ -1,8 +1,9 @@
 """
 Core business logic. Neither front door (api/routes.py's JSON API,
 bff/ui.py's HTMX pages) talks to Temporal or Postgres directly -- only
-this module does. That's what keeps the two front doors (real auth vs.
-mock auth) from drifting out of sync on what's actually allowed.
+this module does. That's what keeps the two front doors (bearer-token
+auth vs. session-cookie auth, both real Keycloak) from drifting out of
+sync on what's actually allowed.
 """
 
 import asyncio

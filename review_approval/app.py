@@ -60,8 +60,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Review/Approval BFF", lifespan=lifespan)
 
-# POC-only session cookie for the mock-auth UI. Use a real, stable secret
-# via env var in anything beyond a local demo.
+# Session cookie for the /ui/* HTMX UI (real Keycloak login, see
+# bff/keycloak_session.py). Use a real, stable secret via env var in
+# anything beyond a local demo.
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("UI_SESSION_SECRET", "dev-only-insecure-secret"),

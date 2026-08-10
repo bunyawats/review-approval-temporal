@@ -3,23 +3,32 @@ Real Keycloak session auth for the /ui/* HTMX UI (Authorization Code
 flow) -- replaces the earlier bff/mock_auth.py (no password, trusted
 whatever role a session cookie claimed).
 
-Session shape: {"username", "role", "access_token", "refresh_token",
-"id_token", "expires_at"}.
+Session shape: {"username", "role", "access_token", "expires_at"} --
+deliberately NOT refresh_token/id_token (see complete_login()'s
+docstring: all three tokens together measured over the ~4KB limit real
+browsers enforce per cookie, and neither is used by any code here).
 
-`role` ("operator"/"manager", lowercase) is a **Phase 2 bridge, not the
-real authorization mechanism** -- it's derived once at login time from
-the token's realm_access.roles claim (Operator/Manager are still plain
-realm roles; see keycloak/INTEGRATION_PLAN.md), purely so bff/ui.py's
-existing require_session_role() dependency keeps working unchanged
-until Phase 3 replaces it with real permission checks via
-workflow/keycloak_auth.get_permissions(). Once that lands, this field
-goes away -- don't build anything new on top of it.
+Two authorization mechanisms, for two different purposes -- don't
+conflate them:
 
-No token refresh yet (see keycloak/INTEGRATION_PLAN.md's Phase 2 open
-item) -- access tokens are short-lived (5 min, confirmed against this
-project's realm); once expired, the session is simply treated as
-logged-out and the user re-authenticates. Simple and correct, if not
-maximally convenient -- a reasonable trade for a POC.
+- **`require_session_role(role)`** gates *page/screen selection*
+  ("operator" vs "manager"), not specific actions -- `Operator`/
+  `Manager` are still plain realm roles (see
+  keycloak/import/myrealm-realm.json), and there's no Resource/
+  Permission for "which screen can I see", so a role check is the
+  right tool here, same as the REST API's `get_current_user()` gating
+  its identity-only GET routes by nothing more than "is this a valid
+  session" -- not a Phase 2 stopgap, a permanent, deliberate choice.
+- **`require_permission(permission)`** / **`check_permission(user,
+  permission)`** gate the five *mutating* actions (Create_Request etc.)
+  via a real UMA ticket exchange (workflow/keycloak_auth.get_permissions())
+  -- the same mechanism api/auth.py uses for the REST API. Added in
+  Phase 3; see keycloak/INTEGRATION_PLAN.md.
+
+No token refresh yet -- access tokens are short-lived (5 min, confirmed
+against this project's realm); once expired, the session is simply
+treated as logged-out and the user re-authenticates. Simple and
+correct, if not maximally convenient -- a reasonable trade for a POC.
 """
 
 import os
@@ -194,14 +203,60 @@ def get_session_user(request: Request) -> dict:
 def require_session_role(role: str):
     """FastAPI dependency factory: require_session_role("operator")
 
-    Phase 2 bridge -- see this module's docstring. Superseded in
-    Phase 3 by real permission checks.
+    Gates page/screen selection, not actions -- see this module's
+    docstring for why this stays role-based rather than moving to
+    permission checks like require_permission() below.
     """
 
     def checker(request: Request) -> dict:
         user = get_session_user(request)
         if user["role"] != role:
             raise HTTPException(status_code=403, detail=f"requires role: {role}")
+        return user
+
+    return checker
+
+
+async def check_permission(user: dict, permission: str) -> None:
+    """Raise HTTPException if `user` doesn't have `permission`.
+
+    Callable directly from inside a route body (for routes that need to
+    pick the required permission based on the request body -- see
+    manager_decision in ui.py, which needs Approve_Request or
+    Reject_Request depending on the submitted decision, mirroring
+    api/routes.py's submit_decision), or via the require_permission()
+    dependency factory below for the common single-fixed-permission
+    case. Same shape as api/auth.py's check_permission() -- both wrap
+    the same workflow/keycloak_auth.get_permissions().
+    """
+    try:
+        granted = await keycloak_auth.get_permissions(user["access_token"])
+    except keycloak_auth.TokenInvalid:
+        # Session's access token itself is no longer valid (expired
+        # between get_session_user()'s own expires_at check and this
+        # call, or rejected for some other reason) -- send back through
+        # login rather than a bare 401, consistent with how every other
+        # session-auth failure in this module behaves.
+        raise RequireLoginRedirect()
+    except keycloak_auth.PermissionCheckError as e:
+        raise HTTPException(status_code=503, detail=f"permission check failed: {e}")
+    if permission not in granted:
+        raise HTTPException(
+            status_code=403, detail=f"requires permission: {permission}"
+        )
+
+
+def require_permission(permission: str):
+    """FastAPI dependency factory: require_permission("Create_Request")
+
+    Gates the five mutating actions via a real UMA ticket exchange --
+    see this module's docstring for how this differs from
+    require_session_role() above.
+    """
+
+    async def checker(request: Request) -> dict:
+        user = get_session_user(request)
+        await check_permission(user, permission)
         return user
 
     return checker

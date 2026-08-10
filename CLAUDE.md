@@ -175,21 +175,25 @@ or `bff/` respectively; don't put front-door-specific logic in
   `applyPolicies` — no code here ever references role names, only
   Resource names. `KEYCLOAK_ISSUER` is read lazily, on first actual call
   to a protected route, not at import time, so the app (including
-  `/ui/*`, which has its own separate `require_session_role()` check
-  (see `bff/keycloak_session.py` below) — this permission model is
-  API-only) runs fully without Keycloak configured at all.
+  `/ui/*`, which has its own separate `require_session_role()`/
+  `require_permission()` checks (see `bff/keycloak_session.py` below))
+  runs fully without Keycloak configured at all.
 - **`bff/keycloak_session.py`** — real Keycloak session auth for `/ui/*`
   (Authorization Code flow), replacing the earlier mock `bff/mock_auth.py`
   (deleted). `login()`'s old "trust the submitted role" is gone;
   `build_authorize_url()`/`complete_login()` do a real redirect + code
-  exchange against Keycloak. **`require_session_role()` still exists as
-  a deliberate Phase 2 bridge, not the real authorization mechanism** —
-  see `keycloak/INTEGRATION_PLAN.md` (Phase 3 replaces it with real
-  `workflow/keycloak_auth.get_permissions()` checks, same as `api/`
-  already does). The session stores `role` ("operator"/"manager",
-  lowercase) derived once at login from the token's `realm_access.roles`
-  claim purely so this bridge keeps working — don't build anything new
-  on top of that field, it goes away in Phase 3.
+  exchange against Keycloak. **Two authorization mechanisms, both
+  permanent, not one superseding the other**: `require_session_role()`
+  gates *screen* access (which of `/ui/operator`/`/ui/manager` a session
+  can see — `Operator`/`Manager` stay plain realm roles since there's no
+  Resource/Permission for "which screen," so a role check is the right
+  tool), while `require_permission()`/`check_permission()` (added Phase
+  3) gate the five *mutating actions* via the same UMA ticket exchange
+  (`workflow/keycloak_auth.get_permissions()`) `api/auth.py` uses for the
+  REST API — see `bff/ui.py` below for how each route uses which. The
+  session's `role` field ("operator"/"manager", lowercase, derived once
+  at login from `realm_access.roles`) is what `require_session_role()`
+  checks — a permanent field, not a bridge slated for removal.
   **Deliberately does NOT store `refresh_token`/`id_token`** — Starlette's
   `SessionMiddleware` signs the whole session into one browser cookie
   (no server-side store), and all three JWTs together measured ~4.5KB
@@ -211,7 +215,24 @@ or `bff/` respectively; don't put front-door-specific logic in
   Keycloak version).
 - **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
   `/ui/operator`, `/ui/manager`). Every route calls `workflow/service.py`,
-  never Temporal/Postgres directly. Dialogs are HTML fragments swapped
+  never Temporal/Postgres directly.
+  **Permission enforcement (Phase 3)**: `new_form`/`create_request`,
+  `edit_form`/`update_request`, and `cancel_form`/`cancel_request_route`
+  are gated by `Depends(require_permission("Create_Request"))` etc.;
+  `manager_decision` branches `Approve_Request`/`Reject_Request` via an
+  inline `check_permission()` call based on the submitted `decision`
+  (can't be a single `Depends()` since the required permission depends
+  on request body, same reasoning as `api/routes.py`'s `submit_decision`)
+  — note `manager_decision` is *also* still gated by
+  `require_session_role("manager")` first, so an operator session gets
+  `403 requires role: manager` before the permission check ever runs
+  (unlike the REST API, which has no role gate on that route, only the
+  permission check — a real behavioral difference between the two front
+  doors, not a bug). `_user_permissions(user)` (a thin wrapper that
+  fails closed to an empty set on any Keycloak error) is called once per
+  page/row render and passed into templates as `permissions`, so button
+  visibility reflects what's actually granted — see the `bff/templates/`
+  bullet below. Dialogs are HTML fragments swapped
   into `#dialog-container` (`_form_dialog.html` for Create/Edit,
   `_cancel_dialog.html` for Cancel, `_detail_dialog.html` for
   View/Review/Approve/Reject).
@@ -472,14 +493,16 @@ only** — not a preview of the Kubernetes shape below.
 - The same `Dockerfile` used for Compose works as the K8s manifest base —
   no Compose-specific assumptions baked in.
 
-## In progress: full Keycloak integration
+## Full Keycloak integration: complete
 
-**`keycloak/INTEGRATION_PLAN.md` has a phased plan and status tracker —
-read it before touching auth-related code.** Phases 1-2 (REST API
-permission enforcement, and real BFF login, both with tests) are done.
-Phase 3 — replacing `bff/ui.py`'s `require_session_role()` role-bridge
-with real permission checks — is not. This section exists so a new
-session picks up the tracker immediately rather than assuming otherwise.
+**`keycloak/INTEGRATION_PLAN.md` has the full phased history and status
+tracker** — real Keycloak login (Authorization Code flow) for `/ui/*`,
+fine-grained permission enforcement (via UMA ticket exchange) on every
+mutating route in both `api/` and `bff/`, and a 35-test suite (11 unit,
+24 integration) covering it end to end. Read that file before touching
+auth-related code — it also documents real gotchas hit along the way
+(cookie-size limits, `post.logout.redirect.uris`, etc.), several of
+which are also captured in the `keycloak-admin` skill.
 
 ## Known gaps
 
@@ -487,25 +510,22 @@ session picks up the tracker immediately rather than assuming otherwise.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
-- **Permission-based authorization is done for `api/` (REST), not yet
-  for `bff/` (`/ui/*`).** `api/auth.py`'s `require_permission()`/
-  `check_permission()` do a real UMA ticket exchange via
-  `workflow/keycloak_auth.py`, wired into every `api/routes.py` route —
-  covered by `tests/unit/test_keycloak_auth.py` (mocked) and
-  `tests/integration/test_api_permissions.py` (real Keycloak + full
-  local stack). `bff/ui.py` has real login now (`bff/keycloak_session.py`,
-  Phase 2) but still gates routes via `require_session_role()`'s
-  lowercase-role bridge, not real permissions — see
-  `keycloak/INTEGRATION_PLAN.md`'s status tracker (Phase 3).
 - No access-token refresh in `bff/keycloak_session.py` — a 5-minute-old
   session just forces re-login. Deliberate simplification, not an
   oversight — see that module's docstring.
+- No caching on either front door's permission checks — every mutating
+  action does a live UMA ticket exchange against Keycloak, no RPT/result
+  caching. Deliberate ("no caching in the first pass" per
+  `keycloak/INTEGRATION_PLAN.md`), acceptable latency cost for now; the
+  natural fix if it ever matters is caching the RPT for its own validity
+  window, not fixed here.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
-- Test suite covers Phase 1's scope (the Keycloak auth core + REST API
-  enforcement) only — no workflow/activity tests yet (`tests/` exists
-  now, under the repo root per the "Testing changes" section below;
-  extend it, don't start a second test tree).
+- Test suite covers the full Keycloak integration (auth core, REST API
+  enforcement, BFF login, BFF permission enforcement) — no
+  workflow/activity tests yet (`tests/` exists now, under the repo root
+  per the "Testing changes" section below; extend it, don't start a
+  second test tree).
 
 ## Running locally
 

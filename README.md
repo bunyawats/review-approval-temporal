@@ -63,11 +63,12 @@ module imports every other module by its real package path.
   for that front door. See the Keycloak setup section below for how
   `Operator`/`Manager` map onto these permissions.
 - **`bff/`** — the server-rendered HTMX UI, real Keycloak login
-  (Authorization Code flow — see `keycloak/INTEGRATION_PLAN.md`; route-
-  level authorization there is still a role bridge, not real permission
-  checks like `api/`'s, tracked as that plan's Phase 3) plus
-  `/sandbox/*`, a standalone playground for htmx experiments (no auth,
-  no Temporal/Postgres).
+  (Authorization Code flow — see `keycloak/INTEGRATION_PLAN.md`) plus
+  the same fine-grained permission checks as `api/` on every mutating
+  route, alongside a role check that gates which screen
+  (`/ui/operator`/`/ui/manager`) a session can see, plus `/sandbox/*`, a
+  standalone playground for htmx experiments (no auth, no
+  Temporal/Postgres).
 - **`app.py`** — assembles the actual FastAPI app: lifespan (Temporal
   client + Postgres pool), session middleware, and mounts all three
   routers (`bff.ui`, `bff.sandbox`, `api.routes`).
@@ -138,14 +139,14 @@ Starts the Temporal Service on `localhost:7233` and the Web UI at
 
 #### 3. Keycloak (required for both `/ui/*` and the JSON API)
 
-> **Note:** `api/` (REST) fully enforces the permissions described
-> below. `/ui/*` has real Keycloak login but still gates routes with a
-> simpler role check, not real permission checks yet — see
-> `keycloak/INTEGRATION_PLAN.md`'s status tracker. This gap doesn't
-> affect logging in or using the app day to day; it's about how fine-grained
-> `/ui/*`'s enforcement is under the hood. For historical context: the
-> permissions below are Resources, not roles, so checking one needs a UMA
-> ticket exchange, not just fixing the string being checked.
+> **Note:** both `api/` (REST) and `/ui/*` (BFF) fully enforce the
+> permissions described below on every mutating route — see
+> `keycloak/INTEGRATION_PLAN.md`'s status tracker. `/ui/*` additionally
+> gates which *screen* (`/ui/operator` vs `/ui/manager`) a session can
+> see via a simpler role check, since there's no Resource/Permission for
+> "which screen" — a deliberate, permanent split, not a gap. The
+> permissions below are Resources, not roles, so checking one needs a
+> UMA ticket exchange, not just a claim lookup on the token.
 
 Run Keycloak in Docker (works fine standalone, without the rest of
 `docker-compose.yml`'s services):
@@ -196,9 +197,11 @@ curl -s -X POST http://localhost:8080/realms/myrealm/protocol/openid-connect/tok
 
 Checking which permissions a token actually carries requires a second
 call — a **UMA ticket exchange**, trading the access token above for the
-resource-server's own view of what it's allowed to do (this is the part
-`api/auth.py` will need to do once `require_permission()` exists — see
-`CLAUDE.md`'s "Known gaps"):
+resource-server's own view of what it's allowed to do. This is exactly
+what `api/auth.py`'s and `bff/keycloak_session.py`'s `require_permission()`/
+`check_permission()` do on every mutating route (via
+`workflow/keycloak_auth.get_permissions()`), one live call per check, no
+caching — see `CLAUDE.md`'s "Known gaps":
 
 ```bash
 curl -s -X POST http://localhost:8080/realms/myrealm/protocol/openid-connect/token \
@@ -362,12 +365,14 @@ simple.
 - `docker-compose.yml` is for **local dev only** — it's not the
   Kubernetes deployment shape. See `CLAUDE.md`'s Kubernetes section for
   the production topology.
-- `/ui/*` now has real Keycloak login (`review_approval/bff/keycloak_session.py`),
-  but its route-level authorization is still a role bridge
-  (`require_session_role()`), not real permission checks like the REST
-  API's — see `keycloak/INTEGRATION_PLAN.md`. No access-token refresh
-  either (a 5-minute-old session just forces re-login). Both are
-  tracked, in-progress simplifications, not silent gaps.
+- `/ui/*` has real Keycloak login and the same fine-grained permission
+  checks as the REST API on every mutating route
+  (`review_approval/bff/keycloak_session.py`) — see
+  `keycloak/INTEGRATION_PLAN.md`. No access-token refresh yet (a
+  5-minute-old session just forces re-login), and no caching on either
+  front door's permission checks (every check is a live UMA call). Both
+  are deliberate simplifications, not silent gaps — see `CLAUDE.md`'s
+  "Known gaps".
 - `verify_aud=False` in `review_approval/api/auth.py` — set and verify a
   real audience once the Keycloak client is configured.
 - No timeout on "wait for Manager decision" — consider adding a

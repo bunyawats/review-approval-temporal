@@ -12,10 +12,10 @@ read isn't enough.
 
 KEYCLOAK_ISSUER/KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET are all read
 lazily (on first real call), not at import time -- see
-workflow/keycloak_auth.py. That lets the app start and serve /ui/*
-(mock auth, pre-Phase-2) fine even with no Keycloak running -- only an
-actual call to a Keycloak-protected JSON endpoint fails, with a clear
-503, if it's unconfigured.
+workflow/keycloak_auth.py. That lets the app start fine even with no
+Keycloak running -- only an actual call to a Keycloak-protected route
+(any JSON API route, or /ui/* once someone tries to log in or hit a
+permission-gated action) fails, with a clear 503, if it's unconfigured.
 """
 
 import jwt
@@ -33,8 +33,7 @@ def _decode_token(token: str) -> dict:
     except RuntimeError as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Keycloak is not configured -- the JSON API requires it. "
-            f"The /ui/* mock-auth screens don't. ({e})",
+            detail=f"Keycloak is not configured. ({e})",
         )
     except jwt.PyJWTError as e:
         raise HTTPException(status_code=401, detail=f"invalid token: {e}")

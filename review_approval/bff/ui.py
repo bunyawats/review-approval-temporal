@@ -4,10 +4,12 @@ login) for session auth. Both front doors call the same
 workflow/service.py functions, so business rules (ownership checks,
 status checks, payload validation) live in one place.
 
-Route-level authorization here is still require_session_role()'s
-Phase 2 role bridge, not real permission checks -- see
-keycloak_session.py's docstring and keycloak/INTEGRATION_PLAN.md
-(Phase 3).
+Two authorization dependencies, for two different purposes -- see
+keycloak_session.py's module docstring for the full reasoning:
+require_session_role() gates page/screen selection (which list a user
+sees); require_permission() gates the five mutating actions via a real
+Keycloak permission check, same mechanism api/auth.py uses for the REST
+API.
 """
 
 import json
@@ -20,12 +22,14 @@ from fastapi.templating import Jinja2Templates
 
 from review_approval.bff.keycloak_session import (
     build_authorize_url,
+    check_permission,
     complete_login,
     logout,
     logout_redirect_url,
+    require_permission,
     require_session_role,
 )
-from review_approval.workflow import service
+from review_approval.workflow import keycloak_auth, service
 from review_approval.workflow.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
 router = APIRouter(prefix="/ui", tags=["Web UI"])
@@ -36,6 +40,26 @@ templates = Jinja2Templates(
 
 def _clients(request: Request):
     return request.app.state.temporal_client, request.app.state.pg_pool
+
+
+async def _user_permissions(user: dict) -> set[str]:
+    """The logged-in user's actual granted permissions, for button-
+    visibility purposes -- defense in depth alongside the route-level
+    require_permission()/check_permission() checks, not a replacement
+    for them (a user could always reach a route directly regardless of
+    what a template renders). Same UMA ticket exchange as those checks,
+    called once per page/row render rather than once per button -- no
+    caching, matching the rest of this effort's "no caching in the
+    first pass" stance; if this page-load latency ever matters, that's
+    the thing to fix, not by skipping this check.
+    """
+    try:
+        return await keycloak_auth.get_permissions(user["access_token"])
+    except (keycloak_auth.TokenInvalid, keycloak_auth.PermissionCheckError):
+        # Can't confirm what's granted -- fail closed (show no action
+        # buttons) rather than crash the page; the route-level checks
+        # are still the real guard if this ever masks a genuine outage.
+        return set()
 
 
 def _render(
@@ -108,18 +132,20 @@ async def logout_submit(request: Request):
 async def operator_page(request: Request, user: dict = Depends(require_session_role("operator"))):
     _, pool = _clients(request)
     reviews = await service.list_reviews(pool, requester=user["username"])
-    return _render(request, "operator.html", {"user": user, "reviews": reviews})
+    permissions = await _user_permissions(user)
+    return _render(request, "operator.html", {"user": user, "reviews": reviews, "permissions": permissions})
 
 
 @router.get("/operator/list", response_class=HTMLResponse)
 async def operator_list(request: Request, user: dict = Depends(require_session_role("operator"))):
     _, pool = _clients(request)
     reviews = await service.list_reviews(pool, requester=user["username"])
-    return _render(request, "_operator_list.html", {"reviews": reviews})
+    permissions = await _user_permissions(user)
+    return _render(request, "_operator_list.html", {"reviews": reviews, "permissions": permissions})
 
 
 @router.get("/operator/new-form", response_class=HTMLResponse)
-async def new_form(request: Request, user: dict = Depends(require_session_role("operator"))):
+async def new_form(request: Request, user: dict = Depends(require_permission("Create_Request"))):
     return _render(
         request,
         "_form_dialog.html",
@@ -136,7 +162,7 @@ async def create_request(
     request: Request,
     review_type: str = Form(...),
     payload_json: str = Form(...),
-    user: dict = Depends(require_session_role("operator")),
+    user: dict = Depends(require_permission("Create_Request")),
 ):
     client, pool = _clients(request)
     payload = _parse_payload_or_none(payload_json)
@@ -171,11 +197,12 @@ async def create_request(
             headers=_RETARGET_DIALOG_HEADERS,
         )
     reviews = await service.list_reviews(pool, requester=user["username"])
-    return _render(request, "_operator_list.html", {"reviews": reviews, "clear_dialog": True})
+    permissions = await _user_permissions(user)
+    return _render(request, "_operator_list.html", {"reviews": reviews, "permissions": permissions, "clear_dialog": True})
 
 
 @router.get("/operator/{request_id}/edit-form", response_class=HTMLResponse)
-async def edit_form(request: Request, request_id: str, user: dict = Depends(require_session_role("operator"))):
+async def edit_form(request: Request, request_id: str, user: dict = Depends(require_permission("Update_Request"))):
     _, pool = _clients(request)
     record = await service.get_review(pool, request_id)
     if record is None or record["requester"] != user["username"]:
@@ -198,7 +225,7 @@ async def update_request(
     request: Request,
     request_id: str,
     payload_json: str = Form(...),
-    user: dict = Depends(require_session_role("operator")),
+    user: dict = Depends(require_permission("Update_Request")),
 ):
     client, pool = _clients(request)
     record = await service.get_review(pool, request_id)
@@ -236,11 +263,12 @@ async def update_request(
             headers=_RETARGET_DIALOG_HEADERS,
         )
     updated = await service.get_review(pool, request_id)
-    return _render(request, "_operator_row_response.html", {"record": updated})
+    permissions = await _user_permissions(user)
+    return _render(request, "_operator_row_response.html", {"record": updated, "permissions": permissions})
 
 
 @router.get("/operator/{request_id}/cancel-form", response_class=HTMLResponse)
-async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_session_role("operator"))):
+async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_permission("Cancel_Request"))):
     _, pool = _clients(request)
     record = await service.get_review(pool, request_id)
     if record is None or record["requester"] != user["username"]:
@@ -257,7 +285,7 @@ async def cancel_request_route(
     request: Request,
     request_id: str,
     comment: str = Form(""),
-    user: dict = Depends(require_session_role("operator")),
+    user: dict = Depends(require_permission("Cancel_Request")),
 ):
     client, pool = _clients(request)
     try:
@@ -270,7 +298,8 @@ async def cancel_request_route(
         # rows outright). outerHTML-swapping empty content just removes
         # the row, which is the reasonable outcome here.
         return HTMLResponse("")
-    return _render(request, "_operator_row_response.html", {"record": updated})
+    permissions = await _user_permissions(user)
+    return _render(request, "_operator_row_response.html", {"record": updated, "permissions": permissions})
 
 
 @router.get("/operator/{request_id}/detail", response_class=HTMLResponse)
@@ -288,14 +317,16 @@ async def operator_detail(request: Request, request_id: str, user: dict = Depend
 async def manager_page(request: Request, user: dict = Depends(require_session_role("manager"))):
     _, pool = _clients(request)
     reviews = await service.list_reviews(pool)
-    return _render(request, "manager.html", {"user": user, "reviews": reviews})
+    permissions = await _user_permissions(user)
+    return _render(request, "manager.html", {"user": user, "reviews": reviews, "permissions": permissions})
 
 
 @router.get("/manager/list", response_class=HTMLResponse)
 async def manager_list(request: Request, user: dict = Depends(require_session_role("manager"))):
     _, pool = _clients(request)
     reviews = await service.list_reviews(pool)
-    return _render(request, "_manager_list.html", {"reviews": reviews})
+    permissions = await _user_permissions(user)
+    return _render(request, "_manager_list.html", {"reviews": reviews, "permissions": permissions})
 
 
 @router.get("/manager/{request_id}/detail", response_class=HTMLResponse)
@@ -304,7 +335,8 @@ async def manager_detail(request: Request, request_id: str, user: dict = Depends
     record = await service.get_review(pool, request_id)
     if record is None:
         raise HTTPException(status_code=404)
-    return _render(request, "_detail_dialog.html", {"record": record, "role": "manager"})
+    permissions = await _user_permissions(user)
+    return _render(request, "_detail_dialog.html", {"record": record, "role": "manager", "permissions": permissions})
 
 
 @router.post("/manager/{request_id}/decision", response_class=HTMLResponse)
@@ -315,17 +347,25 @@ async def manager_decision(
     comment: str = Form(""),
     user: dict = Depends(require_session_role("manager")),
 ):
+    # Approve/reject need different permissions -- which one depends on
+    # the submitted decision, so this can't be expressed as a single
+    # Depends(require_permission(...)); check it explicitly instead.
+    # Mirrors api/routes.py's submit_decision.
+    permission = "Approve_Request" if decision == "APPROVED" else "Reject_Request"
+    await check_permission(user, permission)
     client, pool = _clients(request)
     try:
         await service.submit_decision(client, pool, request_id, decision, user["username"], comment)
     except (LookupError, ValueError) as e:
         record = await service.get_review(pool, request_id)
+        permissions = await _user_permissions(user)
         return _render(
             request,
             "_detail_dialog.html",
-            {"record": record, "role": "manager", "error": str(e)},
+            {"record": record, "role": "manager", "error": str(e), "permissions": permissions},
             400,
             headers=_RETARGET_DIALOG_HEADERS,
         )
     updated = await service.get_review(pool, request_id)
-    return _render(request, "_manager_row_response.html", {"record": updated})
+    permissions = await _user_permissions(user)
+    return _render(request, "_manager_row_response.html", {"record": updated, "permissions": permissions})

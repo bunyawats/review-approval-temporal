@@ -13,7 +13,7 @@
   </thead>
   <tbody>
     {% for r in reviews %}
-    {{ row_macros.operator_row(r) }}
+    {{ row_macros.operator_row(r, permissions) }}
     {% else %}
     <tr><td colspan="5" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
     {% endfor %}
