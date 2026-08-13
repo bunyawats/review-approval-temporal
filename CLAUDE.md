@@ -274,7 +274,7 @@ or `bff/` respectively; don't put front-door-specific logic in
   `base.html` — no custom `<style>` blocks, no custom CSS classes; use
   Tailwind utility classes directly. Status-badge colors are a Jinja
   dict literal (`badge_classes`) **duplicated in three templates**
-  (`_operator_list.html`, `_manager_list.html`, `_detail_dialog.html`) —
+  (`_operator_row.html`, `_manager_row.html`, `_detail_dialog.html`) —
   a new status value needs all three updated. Templates ship as package
   data (`pyproject.toml`'s `[tool.setuptools.package-data]`, which uses a
   recursive `templates/**/*.html` glob so subdirectories like
