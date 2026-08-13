@@ -294,23 +294,38 @@ instead of eyeballing it.
 
 Requires `KEYCLOAK_ISSUER` set and a real Keycloak realm running (see
 the Keycloak setup section above) — not needed for the `/ui/*` screens
-above.
+above. You can also drive these same routes interactively from the
+Swagger UI at `http://localhost:8000/docs` — click **Authorize** and
+paste in a token fetched the same way as below.
 
 `review-approval` is a **confidential** client (has a secret), needed
 for its Authorization Services / Resources+Policies+Permissions setup —
 so token requests need `client_secret` too, unlike a plain public
-client:
+client. `keycloak/get-token.sh` wraps this:
 
 ```bash
-TOKEN=$(curl -s -X POST \
-  "$KEYCLOAK_ISSUER/protocol/openid-connect/token" \
-  -d "client_id=review-approval" \
-  -d "client_secret=dev-secret-change-me" \
-  -d "grant_type=password" \
-  -d "username=operator1" \
-  -d "password=password" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+TOKEN=$(./keycloak/get-token.sh -u operator1)
+MANAGER_TOKEN=$(./keycloak/get-token.sh -u manager1)
 ```
+
+(demo users, password `password`: `operator1`/`operator2` → Operator,
+`manager1`/`manager2` → Manager — see `-h` for all flags.)
+
+**Running the full `docker compose up` stack?** Add `-D`: `bff`
+validates a token's `iss` claim against its own `KEYCLOAK_ISSUER`, which
+`docker-compose.yml` sets to the Docker-internal
+`http://keycloak:8080/realms/myrealm` — a token fetched from the host
+normally has `iss=http://localhost:8080/...` instead and gets rejected
+with `Invalid issuer`. `-D` fetches the token from inside the `bff`
+container instead, so `iss` matches:
+
+```bash
+TOKEN=$(./keycloak/get-token.sh -u operator1 -D)
+```
+
+Not needed for the "hybrid" setup (`bff` run natively, only `keycloak`
+in Docker) — there, both the host and `bff` reach Keycloak via
+`localhost:8080`, so plain (no `-D`) tokens already match.
 
 Create a review request (as Operator):
 
