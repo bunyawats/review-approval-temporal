@@ -112,6 +112,7 @@ docker compose up --build --scale worker-activity=3
 
 - App / UI: **http://localhost:8000** (redirects to `/ui/login`, real
   Keycloak login)
+- JSON API docs (Swagger UI): **http://localhost:8000/docs**
 - Temporal Web UI: **http://localhost:8233**
 - Keycloak admin console: **http://localhost:8080** (`admin`/`admin`)
 - Postgres: `localhost:5432` (`temporal`/`temporal`, databases `temporal`
