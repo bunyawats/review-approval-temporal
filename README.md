@@ -294,9 +294,7 @@ instead of eyeballing it.
 
 Requires `KEYCLOAK_ISSUER` set and a real Keycloak realm running (see
 the Keycloak setup section above) — not needed for the `/ui/*` screens
-above. You can also drive these same routes interactively from the
-Swagger UI at `http://localhost:8000/docs` — click **Authorize** and
-paste in a token fetched the same way as below.
+above.
 
 `review-approval` is a **confidential** client (has a secret), needed
 for its Authorization Services / Resources+Policies+Permissions setup —
@@ -326,6 +324,33 @@ TOKEN=$(./keycloak/get-token.sh -u operator1 -D)
 Not needed for the "hybrid" setup (`bff` run natively, only `keycloak`
 in Docker) — there, both the host and `bff` reach Keycloak via
 `localhost:8080`, so plain (no `-D`) tokens already match.
+
+### Via Swagger UI (interactive)
+
+`http://localhost:8000/docs` lets you drive every JSON API route from
+the browser, no `curl` needed:
+
+1. Get a token as above (`./keycloak/get-token.sh -u operator1`, `-D`
+   if running the full `docker compose up` stack) and copy it.
+2. Open `http://localhost:8000/docs`.
+3. Click **Authorize** (top right, padlock icon), paste the token into
+   the value field — just the raw token, no `Bearer ` prefix, Swagger
+   adds that itself — then **Authorize** → **Close**.
+4. Expand any route, click **Try it out**, fill in params/body, then
+   **Execute**. The auth header is attached automatically to every
+   request from here on.
+
+Notes specific to this app:
+- Tokens expire in 5 minutes — a `401` mid-testing usually just means
+  it's stale; get a fresh one and re-Authorize.
+- `POST /reviews/{id}/decision` needs a **Manager** token for
+  `APPROVED`/`REJECTED` (an Operator token gets `403` there); Create/
+  Update/Cancel need an **Operator** token. Re-Authorize with a
+  different user's token to switch roles.
+- Watch the workflow execute live in the Temporal Web UI at
+  `http://localhost:8233` while you drive it from Swagger.
+
+### Via curl
 
 Create a review request (as Operator):
 
