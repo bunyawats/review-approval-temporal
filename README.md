@@ -113,14 +113,38 @@ docker compose up --build --scale worker-activity=3
 - App / UI: **http://localhost:8000** (redirects to `/ui/login`, real
   Keycloak login)
 - JSON API docs (Swagger UI): **http://localhost:8000/docs**
-- Temporal Web UI: **http://localhost:8233**
+- Temporal Web UI: **http://localhost:8233** (also real Keycloak login —
+  see below, one extra one-time setup step required)
 - Keycloak admin console: **http://localhost:8080** (`admin`/`admin`)
 - Postgres: `localhost:5432` (`temporal`/`temporal`, databases `temporal`
   and `review_approval`)
 
 Only `keycloak` alone is commonly run this way while everything else
 runs natively — see "Running locally" in `CLAUDE.md` for that hybrid
-setup (`docker compose up -d keycloak`, nothing else).
+setup (`docker compose up -d keycloak`, nothing else). Note that
+Temporal Web UI's Keycloak login (below) only works via the Dockerized
+`temporal`/`temporal-ui` services — the native `temporal server
+start-dev` CLI's bundled UI has no such option at all, so using this
+means running `temporal`/`temporal-ui` via Compose even in an otherwise
+hybrid/native setup.
+
+**Required one-time setup for Temporal Web UI login**: add this to
+`/etc/hosts` (needs `sudo`):
+
+```bash
+echo '127.0.0.1 keycloak' | sudo tee -a /etc/hosts
+```
+
+Without it, clicking "Log in" on Temporal Web UI redirects to a
+`keycloak` hostname your browser can't resolve — Temporal UI builds
+that redirect directly from server-side config, with no separate
+browser-facing URL option. Once logged in, use **`temporal-admin1`**
+(password `password`) — the only demo user with the `TemporalAdmin`
+role, which Temporal Web UI login is restricted to (any of the other 4
+demo users get a real `401 Access denied` from Keycloak itself). This
+gates *login only* — every logged-in user still sees every workflow's
+full payload, unfiltered; see `CLAUDE.md`'s "Known gaps" for why
+per-user authorization inside Temporal itself isn't implemented.
 
 To rebuild after code changes: `docker compose up --build`. To reset the
 database: `docker compose down -v`.
@@ -171,7 +195,10 @@ Permissions) rather than plain/composite roles, so that "which role
 grants which action" is its own editable object instead of being baked
 into a role's membership list:
 
-- Two plain (non-composite) realm roles: `Operator`, `Manager`
+- Three plain (non-composite) realm roles: `Operator`, `Manager`,
+  `TemporalAdmin` (the last gates Temporal Web UI login only, via a
+  custom Keycloak authentication flow, not this Resources/Policies/
+  Permissions mechanism — see `CLAUDE.md`'s `temporal-ui` bullet)
 - Five **Resources** on the `review-approval` client, one per action:
   `Create_Request`, `Update_Request`, `Cancel_Request`,
   `Approve_Request`, `Reject_Request`
@@ -182,8 +209,13 @@ into a role's membership list:
 - `review-approval` is a **confidential** client (`secret:
   dev-secret-change-me`) — required, since a public client can't have
   Resources/Policies/Permissions at all
-- Four demo users, password `password` for all: `operator1`/`operator2`
-  (`Operator`), `manager1`/`manager2` (`Manager`)
+- A second confidential client, `temporal-ui` (`secret:
+  temporal-ui-dev-secret-change-me`), used only for Temporal Web UI's
+  own OIDC login — unrelated to this Resources/Policies/Permissions
+  setup
+- Five demo users, password `password` for all: `operator1`/`operator2`
+  (`Operator`), `manager1`/`manager2` (`Manager`), `temporal-admin1`
+  (`TemporalAdmin`)
 
 Adding a new role later (e.g. an `Auditor` who can create and cancel but
 not approve/reject) is pure Keycloak config: new `Auditor` role, new

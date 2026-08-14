@@ -434,7 +434,10 @@ only** — not a preview of the Kubernetes shape below.
   skill for why a plain restart silently skips re-importing). That skill
   covers the general Docker/realm-import/Authorization-Services
   mechanics; this bullet is just what's specific to this project:
-  - 2 plain (non-composite) realm roles: `Operator`, `Manager`
+  - 3 plain (non-composite) realm roles: `Operator`, `Manager`,
+    `TemporalAdmin` (the last one gates Temporal Web UI login only — see
+    the `temporal-ui` bullet below, not related to the REST/BFF
+    permission model)
   - 5 Resources on the `review-approval` client: `Create_Request`,
     `Update_Request`, `Cancel_Request`, `Approve_Request`,
     `Reject_Request`
@@ -444,8 +447,12 @@ only** — not a preview of the Kubernetes shape below.
   - `review-approval` is a confidential client, `secret:
     dev-secret-change-me` (fine for `start-dev`-only local dev, plainly
     checked into the JSON — never do this anywhere real)
-  - 4 demo users, password `password`: `operator1`/`operator2` →
-    `Operator`, `manager1`/`manager2` → `Manager`
+  - A second confidential client, `temporal-ui` (`secret:
+    temporal-ui-dev-secret-change-me`) — see the `temporal-ui` bullet
+    below for what it's for
+  - 5 demo users, password `password`: `operator1`/`operator2` →
+    `Operator`, `manager1`/`manager2` → `Manager`, `temporal-admin1` →
+    `TemporalAdmin`
   Verified end to end, not just configured: a real UMA ticket exchange
   for `operator1` returns exactly `Create_Request`/`Update_Request`/
   `Cancel_Request`, `manager1` exactly `Approve_Request`/`Reject_Request`
@@ -457,7 +464,23 @@ only** — not a preview of the Kubernetes shape below.
   line (a filled-in version of the `keycloak-admin` skill's general
   script).
   **The 4 core app services are commonly run natively instead**, with
-  only `keycloak` in Docker — see "Running locally" below.
+  only `keycloak` in Docker — see "Running locally" below. Note this
+  doesn't apply to `temporal-ui`'s own auth (next bullet), which only
+  works via the Dockerized `temporal`/`temporal-ui` services — the
+  native `temporal server start-dev` CLI's bundled UI has no OIDC config
+  surface at all.
+- **`temporal-ui`** — `temporalio/ui:latest`, gated behind real Keycloak
+  login (`TEMPORAL_AUTH_*` env vars), restricted to a dedicated
+  `TemporalAdmin` role via a custom Keycloak conditional authentication
+  flow. **`keycloak/TEMPORAL_UI_AUTH.md` has the full runbook** — exact
+  steps to reproduce this on a fresh machine (including the required
+  `/etc/hosts` entry, or it silently breaks), the architecture
+  rationale, and every gotcha hit building it (wrong authenticator
+  provider id, `CONDITIONAL` vs `REQUIRED` subflow semantics,
+  `PROVIDER_URL` vs `ISSUER_URL`). Read that file before touching this
+  flow or the `temporal-ui` client. **Authentication only** — every
+  logged-in user still sees every workflow's full payload, unfiltered;
+  see "Known gaps".
 
 ## Deployment target: Kubernetes
 
@@ -524,6 +547,13 @@ BFF wiring, then cleanup) for picking this up across multiple sessions.
 
 ## Known gaps
 
+- Temporal Web UI's Keycloak integration is authentication-only (gates
+  who can log in, via the `TemporalAdmin` role) — not per-user
+  authorization inside the UI. Every `TemporalAdmin` sees every
+  workflow's full payload, unfiltered by requester. Real Temporal-side
+  authorization would need custom Go server code, not just env vars on
+  the stock image — deliberately not attempted; see the `temporal-ui`
+  bullet under "Local dev: Docker Compose".
 - No timeout on "wait for Manager decision" — requests can wait forever.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the

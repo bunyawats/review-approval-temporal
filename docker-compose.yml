@@ -38,9 +38,28 @@ services:
     image: temporalio/ui:latest
     depends_on:
       - temporal
+      - keycloak
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_AUTH_ENABLED=true
+      # temporalio/ui builds its browser-facing redirect straight from
+      # PROVIDER_URL (no separate browser-facing override exists), and
+      # separately validates each returned token's iss claim against
+      # ISSUER_URL (defaults to PROVIDER_URL if unset) -- they must
+      # resolve to the exact same place both server-side (container-to-
+      # container) and from the browser, or the callback 500s with an
+      # "issued by a different provider" mismatch. That means the plain
+      # localhost-vs-keycloak-hostname split this app's own bff service
+      # uses (see CLAUDE.md's Docker networking notes) does NOT work
+      # here -- instead, local dev requires a host-machine /etc/hosts
+      # entry ("127.0.0.1 keycloak") so this same hostname resolves both
+      # ways, and PROVIDER_URL/ISSUER_URL can just agree (see README).
+      - TEMPORAL_AUTH_PROVIDER_URL=http://keycloak:8080/realms/myrealm
+      - TEMPORAL_AUTH_CLIENT_ID=temporal-ui
+      - TEMPORAL_AUTH_CLIENT_SECRET=temporal-ui-dev-secret-change-me
+      - TEMPORAL_AUTH_CALLBACK_URL=http://localhost:8233/auth/sso/callback
+      - TEMPORAL_AUTH_SCOPES=openid,profile,email
     ports:
       - "8233:8080"
 

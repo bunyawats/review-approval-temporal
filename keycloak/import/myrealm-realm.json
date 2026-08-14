@@ -13,6 +13,11 @@
         "name": "Manager",
         "description": "Approves or rejects pending review requests.",
         "composite": false
+      },
+      {
+        "name": "TemporalAdmin",
+        "description": "May log into the Temporal Web UI. Grants unfiltered visibility into every workflow's payload across all requesters -- assign deliberately, not by default.",
+        "composite": false
       }
     ]
   },
@@ -145,6 +150,83 @@
           }
         ]
       }
+    },
+    {
+      "clientId": "temporal-ui",
+      "name": "Temporal Web UI",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "temporal-ui-dev-secret-change-me",
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8233/auth/sso/callback"
+      ],
+      "webOrigins": ["http://localhost:8233"],
+      "authenticationFlowBindingOverrides": {
+        "browser": "b10c3f6e-0000-4000-8000-000000000001"
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "id": "b10c3f6e-0000-4000-8000-000000000001",
+      "alias": "temporal-ui-browser",
+      "description": "Username/password login for the Temporal Web UI, gated to the TemporalAdmin role. No SSO-cookie reuse from the review-approval client on purpose, so the role check always runs.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "autheticatorFlow": false
+        },
+        {
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "autheticatorFlow": true,
+          "flowAlias": "temporal-ui-require-admin-role",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "temporal-ui-require-admin-role",
+      "description": "Denies login to any user without the TemporalAdmin role.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "require-temporal-admin-role",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "autheticatorFlow": false
+        },
+        {
+          "authenticator": "deny-access-authenticator",
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "autheticatorFlow": false
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "require-temporal-admin-role",
+      "config": {
+        "condUserRole": "TemporalAdmin",
+        "negate": "true"
+      }
     }
   ],
   "users": [
@@ -199,6 +281,19 @@
         {"type": "password", "value": "password", "temporary": false}
       ],
       "realmRoles": ["Manager", "default-roles-myrealm"]
+    },
+    {
+      "username": "temporal-admin1",
+      "firstName": "Temporal",
+      "lastName": "Admin",
+      "email": "temporal-admin1@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["TemporalAdmin", "default-roles-myrealm"]
     }
   ]
 }
