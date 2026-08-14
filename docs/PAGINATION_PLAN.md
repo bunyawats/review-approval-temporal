@@ -9,7 +9,8 @@
 >       count-cache core, `POST /reviews/search` on the REST API, tests
 > - [ ] Phase 2 — BFF wiring (`/ui/operator/list`, `/ui/manager/list`),
 >       pagination controls in the templates, 5s poll carries
->       `query_id`/`page`
+>       `query_id`/`page`; REST API's old `GET /reviews` removed in favor
+>       of `POST /reviews/search`
 > - [ ] Phase 3 — cleanup: remove the now-superseded `list_reviews()`,
 >       update `CLAUDE.md`/`README.md` to describe the final shape
 
@@ -70,7 +71,7 @@ Content-Type: application/json
   `validate_payload()`'s existing behavior for unknown review types.
 
 **Response:**
-```json
+```
 {
   "query_id": "3fa2b1c4-5b6a-4e1f-9c3d-...",
   "page": 0,
