@@ -13,7 +13,13 @@ services:
       - ./db/init:/docker-entrypoint-initdb.d:ro
       - ./db/schema.sql:/schema.sql:ro
     ports:
-      - "5432:5432"
+      # Host-side port only -- Temporal itself reaches this container via
+      # the Docker-internal hostname `postgres` (POSTGRES_SEEDS below),
+      # never via this published port. Off 5432 so it doesn't collide with
+      # a natively-installed Postgres also listening on the host's 5432
+      # (this project's app data lives there instead in that topology --
+      # see CLAUDE.md's "Running locally" hybrid section).
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U temporal"]
       interval: 5s
