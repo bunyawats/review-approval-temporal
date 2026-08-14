@@ -504,6 +504,24 @@ auth-related code — it also documents real gotchas hit along the way
 (cookie-size limits, `post.logout.redirect.uris`, etc.), several of
 which are also captured in the `keycloak-admin` skill.
 
+## Paginated review-request listing: planned
+
+**`docs/PAGINATION_PLAN.md` has the full API spec and phased status
+tracker** — a new `POST /reviews/search` endpoint (POST, not GET, so
+`page`/`page_size`/`query_id`/`filter` all live in the JSON body) adding
+real pagination plus a total-count cache to what's currently an
+unpaginated `SELECT *` on every call (`workflow/service.py`'s
+`list_reviews()`), including the `(requester, created_at DESC)` and
+`(created_at DESC)` indexes that query pattern has always needed but
+never had. The count cache is keyed by a `query_id` the server mints and
+the client echoes back; only the total count is ever cached (row data
+always runs live), it's bypassed entirely whenever a `filter` is
+supplied, and a `query_id` used without a `filter` that isn't found
+(expired/unknown) fails with `400` rather than silently falling back to
+unfiltered. Read that file before touching `list_reviews()` or `GET
+/reviews` — it also has the full phase breakdown (REST API first, then
+BFF wiring, then cleanup) for picking this up across multiple sessions.
+
 ## Known gaps
 
 - No timeout on "wait for Manager decision" — requests can wait forever.
@@ -521,6 +539,10 @@ which are also captured in the `keycloak-admin` skill.
   window, not fixed here.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
+- `GET /reviews` and every BFF list route are unpaginated, unindexed on
+  `requester`/`created_at`, and re-run in full on the BFF's 5s poll —
+  see `docs/PAGINATION_PLAN.md` for the planned `POST /reviews/search`
+  fix (not yet implemented, Phase 1 not started).
 - Test suite covers the full Keycloak integration (auth core, REST API
   enforcement, BFF login, BFF permission enforcement) — no
   workflow/activity tests yet (`tests/` exists now, under the repo root
