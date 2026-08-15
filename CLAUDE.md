@@ -559,6 +559,19 @@ screen's cache reuse stays safe across sessions. Read
 either front door's search/list routes — it has the full phase
 breakdown and the reasoning behind each caching/fallback decision.
 
+## Server-side session store (Redis) + token refresh: planned
+
+**`docs/SESSION_STORE_PLAN.md` has the full design and phased status
+tracker** — moves the `/ui/*` session (currently entirely inside
+Starlette's signed-but-**not encrypted** `SessionMiddleware` cookie,
+including the raw Keycloak `access_token`) into Redis, with the browser
+cookie holding only an opaque session id, and adds real refresh-token-
+based renewal so a session survives longer than the 5-minute access
+token lifetime — up to 30 minutes of inactivity, matching this realm's
+actual `ssoSessionIdleTimeout` (confirmed live via the Admin API, not
+assumed). Not started; read that file before touching
+`bff/keycloak_session.py`'s session shape or login/logout flow.
+
 ## Known gaps
 
 - Temporal Web UI's Keycloak integration is authentication-only (gates
