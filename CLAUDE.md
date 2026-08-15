@@ -351,8 +351,9 @@ or `bff/` respectively; don't put front-door-specific logic in
   additional routes in this file plus a `templates/sandbox/*.html`
   file, linked from `sandbox/index.html`.
 - **`db/schema.sql`** — Postgres is the queryable/audit record; the JSON
-  API's `GET /reviews` and the UI's list screens read from it directly
-  (reads only — writes always go through a workflow signal/activity).
+  API's `POST /reviews/search` and the UI's list screens read from it
+  directly (reads only — writes always go through a workflow
+  signal/activity).
   Temporal is the source of truth for *live* workflow state. Not part of
   the `review_approval` Python package and never copied into the app's
   Docker image — only the `postgres` service in `docker-compose.yml`
@@ -362,9 +363,15 @@ or `bff/` respectively; don't put front-door-specific logic in
 
 - **Visibility**: Operators see only requests where
   `requester == their username`. Managers see *all* requests. Enforced
-  by whether `service.list_reviews()` is called with a `requester`
-  filter (operator routes) or without one (manager routes, JSON API's
-  `GET /reviews`) — no separate permission check exists beyond that.
+  by whether `service.list_reviews_page()` is called with
+  `filter={"requester": ...}` (operator routes) or no filter (manager
+  routes, JSON API's `POST /reviews/search`) — no separate permission
+  check exists beyond that. On the BFF, operator pagination round-trips
+  a `query_id` instead of resending `filter` on every request (see
+  `bff/ui.py`'s `operator_list()`); what actually enforces this
+  invariant there is an explicit check that the cached entry's
+  `filter.requester` still matches the session's username before
+  trusting it — see `docs/PAGINATION_PLAN.md`'s BFF note.
 - **Terminal states are view-only, for both roles, no exceptions.** Once
   `APPROVED`/`REJECTED`/`CANCELLED`, nobody can edit, cancel, or
   re-decide — not the requester, not any manager.
@@ -569,10 +576,13 @@ BFF wiring, then cleanup) for picking this up across multiple sessions.
   window, not fixed here.
 - No automated check that every `KNOWN_REVIEW_TYPES` entry has a worker
   polling its queue.
-- `GET /reviews` and every BFF list route are unpaginated, unindexed on
-  `requester`/`created_at`, and re-run in full on the BFF's 5s poll —
-  see `docs/PAGINATION_PLAN.md` for the planned `POST /reviews/search`
-  fix (not yet implemented, Phase 1 not started).
+- Review-request listing is now paginated end to end (`POST
+  /reviews/search`, and the BFF's operator/manager screens on top of
+  it — see `docs/PAGINATION_PLAN.md`), but the count cache's staleness
+  is TTL-bounded (30s), not event-invalidated on writes — a deliberate
+  simplification, not an oversight, matching this project's existing
+  "no caching in the first pass" pattern for UMA permission checks.
+  `docs/PAGINATION_PLAN.md`'s Phase 3 (cleanup/docs) is still open.
 - Test suite covers the full Keycloak integration (auth core, REST API
   enforcement, BFF login, BFF permission enforcement) — no
   workflow/activity tests yet (`tests/` exists now, under the repo root

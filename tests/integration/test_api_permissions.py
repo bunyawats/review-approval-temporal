@@ -151,16 +151,16 @@ def test_manager_can_reject(client, tokens):
 
 # ------------------------------------------------------------- read routes -----
 
-def test_get_and_list_require_only_authentication_not_permission(client, tokens):
+def test_get_and_search_require_only_authentication_not_permission(client, tokens):
     request_id = _create_as(client, tokens["operator1"])
 
-    # Both roles can read -- get_review/list_reviews are identity-only,
+    # Both roles can read -- get_review/search_reviews are identity-only,
     # no permission gate, per api/routes.py's existing design.
     for token in (tokens["operator1"], tokens["manager1"]):
         response = client.get(f"/reviews/{request_id}", headers=_auth(token))
         assert response.status_code == 200
 
-    response = client.get("/reviews", headers=_auth(tokens["manager1"]))
+    response = client.post("/reviews/search", headers=_auth(tokens["manager1"]), json={})
     assert response.status_code == 200
 
 

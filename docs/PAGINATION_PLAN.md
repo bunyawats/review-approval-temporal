@@ -7,7 +7,7 @@
 >
 > - [x] Phase 1 — schema indexes, `workflow/service.py` pagination +
 >       count-cache core, `POST /reviews/search` on the REST API, tests
-> - [ ] Phase 2 — BFF wiring (`/ui/operator/list`, `/ui/manager/list`),
+> - [x] Phase 2 — BFF wiring (`/ui/operator/list`, `/ui/manager/list`),
 >       pagination controls in the templates, 5s poll carries
 >       `query_id`/`page`; REST API's old `GET /reviews` removed in favor
 >       of `POST /reviews/search`
@@ -116,12 +116,22 @@ call:
   "deliberate simplification" pattern as the UMA permission-check
   caching gap already documented in `CLAUDE.md`'s "Known gaps").
 
-**BFF note for Phase 2**: the BFF must always send `filter.requester`
-explicitly on every poll — never relies on the cached-filter path above.
-The operator-visibility invariant (`requester == session user`) has to
-hold even after a cache entry expires mid-session; relying on the cache
-to remember the filter would break that invariant the moment the TTL
-lapses.
+**BFF note for Phase 2** (revised during Phase 2 implementation): the
+operator screen sends `filter.requester` only on the *first* load of a
+pagination sequence (page load, or right after Create) — every
+paging/polling request after that sends only `page`/`page_size`/
+`query_id`, resolving `(filter, total)` from the cache exactly like the
+manager screen does, so both screens get the same caching benefit. What
+actually enforces the operator-visibility invariant is not "always
+resend filter" (the earlier, more conservative design) but an explicit
+check on the query_id-lookup path: the BFF verifies the cached entry's
+`filter.requester` equals the current session's username before
+trusting it. Any mismatch — including a stale/unknown/expired query_id,
+or (in principle) a tampered/cross-session one — is treated as a cache
+miss and falls back to a fresh, correctly-filtered call that mints a new
+entry. `workflow/service.py` itself doesn't know about sessions or
+usernames; this check has to live in `bff/ui.py`, since it's the one
+place that knows which user is asking.
 
 **New indexes** (the actual query-optimization half of this plan):
 ```sql
@@ -181,17 +191,25 @@ every 5 seconds.
 
 **Files**:
 - `bff/ui.py` — `/ui/operator`, `/ui/operator/list`, `/ui/manager`,
-  `/ui/manager/list` migrate to `list_reviews_page()`. Operator routes
-  always pass `filter={"requester": user["username"]}` explicitly (see
-  the BFF note above — never rely on the cached-filter path). Manager
-  routes pass no `requester` filter (unchanged visibility).
+  `/ui/manager/list` migrate to `list_reviews_page()`. `/ui/operator`
+  (first load) and the post-Create re-render pass
+  `filter={"requester": user["username"]}` explicitly, minting a fresh
+  cache entry each time; `/ui/operator/list` (paging/polling) sends only
+  `page`/`query_id`, resolving `(filter, total)` from the cache and
+  checking the cached `filter.requester` matches the session before
+  trusting it (see the BFF note above) — falling back to a fresh
+  filtered call on any mismatch, unknown, or expired `query_id`. Manager
+  routes pass no `requester` filter at any point (unchanged visibility)
+  and always round-trip `query_id`, with the same expired/unknown
+  fallback (recompute at the same page, not page 0).
 - `bff/templates/_operator_list.html`, `_manager_list.html` — add
-  Prev/Next controls; the self-polling `<table>` element carries the
-  current `page` and `query_id` as data-attributes, resent as hidden
-  `hx-post` form fields on each 5s poll trigger, so (a) the poll reuses
-  the cached count instead of minting a new `query_id` every cycle, and
-  (b) the poll doesn't silently reset the user back to page 0 while
-  they're browsing a later page.
+  Prev/Next controls plus a "Showing X–Y of Z" summary in a `<tfoot>`.
+  Simpler than originally sketched here: since the whole `<table>` is
+  replaced via `outerHTML` on every poll tick or Prev/Next click, each
+  render's own `page`/`query_id` are baked directly into that render's
+  `hx-vals` as literals — no client-side JS or data-attribute reads
+  needed, since the next request (whichever triggers it) always carries
+  forward whatever the *last render* actually showed.
 - `bff/templates/_operator_row.html`, `_manager_row.html` — no change
   expected (row rendering is unaffected by pagination), but verify
   Save/Cancel/Approve/Reject's single-row re-render still integrates
@@ -208,14 +226,21 @@ listing and that the poll's `query_id`/`page` round-trip correctly.
 
 **Goal**: no leftover unpaginated code path, docs match reality.
 
-- Remove `workflow/service.py`'s old `list_reviews()` once nothing calls
-  it (confirm via grep across `api/` and `bff/`).
-- `CLAUDE.md`/`README.md` — update to describe the final implemented
-  shape (endpoint contract, indexes, cache behavior) and note the
-  accepted limitation: count-cache staleness is TTL-bounded (30s), not
-  event-invalidated on writes — a deliberate simplification, not an
-  oversight, matching this project's existing "no caching in the first
-  pass" pattern for UMA permission checks.
-- Sweep for any remaining reference to the old unpaginated
-  `list_reviews()` signature or bare-array `GET /reviews`-style response
-  shape in comments/docstrings, to confirm nothing was missed.
+- [x] `workflow/service.py`'s old `list_reviews()` removed, along with
+      `GET /reviews` in `api/routes.py` — done early, alongside Phase 2,
+      once the BFF's migration left both with zero callers (confirmed
+      via grep across `api/` and `bff/`); `test_api_permissions.py`'s
+      read-routes test updated to exercise `POST /reviews/search`
+      instead.
+- [x] `CLAUDE.md` — the Visibility invariant bullet, the `db/schema.sql`
+      bullet, and the "Known gaps" listing-pagination bullet updated to
+      describe the final implemented shape and the accepted count-cache
+      staleness limitation (TTL-bounded, not event-invalidated).
+- [ ] `README.md` — still describes create/decision/cancel + the Phase 1
+      `POST /reviews/search` examples; not yet updated for the BFF-side
+      shape (`_UI_PAGE_SIZE`, query_id round-tripping) since that's UI
+      behavior rather than something a curl example would show.
+- [ ] Sweep for any remaining reference to the old unpaginated
+      `list_reviews()` signature or bare-array `GET /reviews`-style
+      response shape in comments/docstrings, to confirm nothing was
+      missed.

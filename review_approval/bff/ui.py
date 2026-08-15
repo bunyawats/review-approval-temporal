@@ -37,6 +37,14 @@ templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
 
+# UI-only display choice, smaller than list_reviews_page()'s own 20-row
+# default -- doesn't affect the REST API, which still gets that default
+# when it omits page_size. Passed explicitly on every call (including
+# query_id-lookup ones): the count cache only stores (filter, total), not
+# page_size, so it has to be resupplied every time to keep row slicing
+# consistent with what's actually rendered.
+_UI_PAGE_SIZE = 10
+
 
 def _clients(request: Request):
     return request.app.state.temporal_client, request.app.state.pg_pool
@@ -131,17 +139,47 @@ async def logout_submit(request: Request):
 @router.get("/operator", response_class=HTMLResponse)
 async def operator_page(request: Request, user: dict = Depends(require_session_role("operator"))):
     _, pool = _clients(request)
-    reviews = await service.list_reviews(pool, requester=user["username"])
+    paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    return _render(request, "operator.html", {"user": user, "reviews": reviews, "permissions": permissions})
+    return _render(request, "operator.html", {"user": user, "paged": paged, "permissions": permissions})
 
 
-@router.get("/operator/list", response_class=HTMLResponse)
-async def operator_list(request: Request, user: dict = Depends(require_session_role("operator"))):
+@router.post("/operator/list", response_class=HTMLResponse)
+async def operator_list(
+    request: Request,
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("operator")),
+):
+    # Paging/polling never resends filter -- it round-trips query_id so
+    # the server resolves (filter, total) from the cache, same as the
+    # manager list. But unlike manager, the cache here holds someone's
+    # *identity* (filter.requester), and query_id is just an opaque
+    # string the client hands back -- nothing stops a tampered or
+    # cross-session query_id from resolving to a DIFFERENT operator's
+    # cached filter. So the cached filter's requester is checked against
+    # this session's actual username before it's trusted; any mismatch
+    # (including expiry/unknown query_id, same as the manager fallback)
+    # re-mints a fresh, correctly-filtered entry instead. This is what
+    # actually enforces the operator-visibility invariant now that the
+    # filter itself is no longer sent on every request -- see CLAUDE.md's
+    # "Operators see only requests where requester == their username".
     _, pool = _clients(request)
-    reviews = await service.list_reviews(pool, requester=user["username"])
+    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
+    paged = None
+    if query_id:
+        try:
+            candidate = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate.filter.get("requester") == user["username"]:
+            paged = candidate
+    if paged is None:
+        paged = await service.list_reviews_page(
+            pool, page=page, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]}
+        )
     permissions = await _user_permissions(user)
-    return _render(request, "_operator_list.html", {"reviews": reviews, "permissions": permissions})
+    return _render(request, "_operator_list.html", {"paged": paged, "permissions": permissions})
 
 
 @router.get("/operator/new-form", response_class=HTMLResponse)
@@ -196,9 +234,10 @@ async def create_request(
             400,
             headers=_RETARGET_DIALOG_HEADERS,
         )
-    reviews = await service.list_reviews(pool, requester=user["username"])
+    # New requests sort first (created_at DESC) -- page 0 always shows it.
+    paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    return _render(request, "_operator_list.html", {"reviews": reviews, "permissions": permissions, "clear_dialog": True})
+    return _render(request, "_operator_list.html", {"paged": paged, "permissions": permissions, "clear_dialog": True})
 
 
 @router.get("/operator/{request_id}/edit-form", response_class=HTMLResponse)
@@ -316,17 +355,34 @@ async def operator_detail(request: Request, request_id: str, user: dict = Depend
 @router.get("/manager", response_class=HTMLResponse)
 async def manager_page(request: Request, user: dict = Depends(require_session_role("manager"))):
     _, pool = _clients(request)
-    reviews = await service.list_reviews(pool)
+    paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE)
     permissions = await _user_permissions(user)
-    return _render(request, "manager.html", {"user": user, "reviews": reviews, "permissions": permissions})
+    return _render(request, "manager.html", {"user": user, "paged": paged, "permissions": permissions})
 
 
-@router.get("/manager/list", response_class=HTMLResponse)
-async def manager_list(request: Request, user: dict = Depends(require_session_role("manager"))):
+@router.post("/manager/list", response_class=HTMLResponse)
+async def manager_list(
+    request: Request,
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("manager")),
+):
+    # No requester filter (manager visibility is unrestricted), so unlike
+    # the operator poll, this one actually benefits from the count cache:
+    # a query_id round-tripped from the previous render skips the COUNT(*)
+    # entirely. The cache's 30s TTL is shorter than nothing (it never
+    # refreshes itself on read), so a query_id that outlives it raises
+    # ValueError -- fall back to a fresh, uncached page at the same page
+    # number rather than resetting the user to page 0 or erroring out a
+    # poll they never directly triggered.
     _, pool = _clients(request)
-    reviews = await service.list_reviews(pool)
+    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
+    try:
+        paged = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id or None)
+    except ValueError:
+        paged = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE)
     permissions = await _user_permissions(user)
-    return _render(request, "_manager_list.html", {"reviews": reviews, "permissions": permissions})
+    return _render(request, "_manager_list.html", {"paged": paged, "permissions": permissions})
 
 
 @router.get("/manager/{request_id}/detail", response_class=HTMLResponse)

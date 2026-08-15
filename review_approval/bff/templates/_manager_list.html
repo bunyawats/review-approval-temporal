@@ -1,5 +1,17 @@
 {% import "_manager_row.html" as row_macros %}
-<table id="request-list" hx-get="/ui/manager/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
+{#
+  Unlike the operator list, this poll sends no requester filter (manager
+  visibility is unrestricted), so it round-trips query_id to actually
+  benefit from the count cache -- see bff/ui.py's manager_list() and
+  docs/PAGINATION_PLAN.md's BFF note. hx-vals bakes in *this render's*
+  page/query_id as literals; every subsequent render (self-poll tick, or
+  a Prev/Next click below) fully replaces this <table> via outerHTML,
+  including its own hx-vals, so the next poll always resends whatever
+  page the user is actually looking at.
+#}
+<table id="request-list"
+  hx-post="/ui/manager/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
+  hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
     <tr>
@@ -12,10 +24,37 @@
     </tr>
   </thead>
   <tbody>
-    {% for r in reviews %}
+    {% for r in paged.items %}
     {{ row_macros.manager_row(r, permissions) }}
     {% else %}
     <tr><td colspan="6" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
     {% endfor %}
   </tbody>
+  <tfoot>
+    <tr>
+      <td colspan="6" class="px-3.5 py-2.5 border-t border-gray-200 bg-gray-50">
+        <div class="flex justify-between items-center text-sm text-gray-600">
+          <span>
+            {% if paged.total > 0 %}
+            Showing {{ paged.page * paged.page_size + 1 }}–{{ [(paged.page + 1) * paged.page_size, paged.total] | min }} of {{ paged.total }}
+            {% else %}
+            &nbsp;
+            {% endif %}
+          </span>
+          <div class="flex gap-2">
+            <button type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              {% if paged.page == 0 %}disabled{% endif %}
+              hx-post="/ui/manager/list" hx-target="#request-list" hx-swap="outerHTML"
+              hx-vals='{"page": {{ paged.page - 1 }}, "query_id": "{{ paged.query_id }}"}'>Prev</button>
+            <button type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              {% if (paged.page + 1) * paged.page_size >= paged.total %}disabled{% endif %}
+              hx-post="/ui/manager/list" hx-target="#request-list" hx-swap="outerHTML"
+              hx-vals='{"page": {{ paged.page + 1 }}, "query_id": "{{ paged.query_id }}"}'>Next</button>
+          </div>
+        </div>
+      </td>
+    </tr>
+  </tfoot>
 </table>

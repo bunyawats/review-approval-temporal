@@ -83,23 +83,6 @@ async def create_review(
     return request_id
 
 
-async def list_reviews(
-    pool: asyncpg.Pool, requester: Optional[str] = None
-) -> list[dict]:
-    async with pool.acquire() as conn:
-        if requester:
-            rows = await conn.fetch(
-                "SELECT * FROM review_requests WHERE requester = $1 "
-                "ORDER BY created_at DESC",
-                requester,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM review_requests ORDER BY created_at DESC"
-            )
-    return [dict(r) for r in rows]
-
-
 _QUERY_CACHE_TTL_S = 30.0
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 100

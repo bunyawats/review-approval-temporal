@@ -149,11 +149,6 @@ async def submit_decision(
     return {"status": "signal_sent"}
 
 
-@router.get("/reviews")
-async def list_reviews(request: Request, user: dict = Depends(get_current_user)):
-    return await service.list_reviews(request.app.state.pg_pool)
-
-
 @router.post("/reviews/search")
 async def search_reviews(
     body: ReviewSearchRequest,
