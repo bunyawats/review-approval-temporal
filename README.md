@@ -116,8 +116,9 @@ docker compose up --build --scale worker-activity=3
 - Temporal Web UI: **http://localhost:8233** (also real Keycloak login —
   see below, one extra one-time setup step required)
 - Keycloak admin console: **http://localhost:8080** (`admin`/`admin`)
-- Postgres: `localhost:5432` (`temporal`/`temporal`, databases `temporal`
-  and `review_approval`)
+- Postgres: `localhost:5433` (`temporal`/`temporal`, databases `temporal`
+  and `review_approval`) — off the standard `5432` so it doesn't collide
+  with a natively-installed Postgres also listening on the host
 
 Only `keycloak` alone is commonly run this way while everything else
 runs natively — see "Running locally" in `CLAUDE.md` for that hybrid
@@ -303,8 +304,17 @@ Open **http://localhost:8000** — it redirects to a login screen with a
   operator. Clicking a row opens a dialog with the full JSON payload;
   pending ones get Approve/Reject buttons, decided ones are view-only.
 
-Both screens poll every 5 seconds so a Manager's decision shows up on the
-Operator's screen (and vice versa) without a manual refresh.
+Both screens are paginated, 10 rows per page, with Prev/Next controls
+and a "Showing X–Y of Z" count. Both also poll every 5 seconds so a
+Manager's decision shows up on the Operator's screen (and vice versa)
+without a manual refresh — the poll and Prev/Next both reuse a cached
+row count (`query_id`, minted server-side, round-tripped by the page)
+rather than re-running `COUNT(*)` on every tick; see
+`docs/PAGINATION_PLAN.md` for the full design (including why the
+Operator screen's cache reuse needs an extra check that the manager
+screen's doesn't — the cached filter has to be re-verified against the
+logged-in session before it's trusted, so one operator's session can
+never end up paging through another's requests).
 
 The UI calls `review_approval/workflow/service.py` directly (not the
 JSON API) after establishing its own Keycloak-backed session — both

@@ -11,7 +11,7 @@
 >       pagination controls in the templates, 5s poll carries
 >       `query_id`/`page`; REST API's old `GET /reviews` removed in favor
 >       of `POST /reviews/search`
-> - [ ] Phase 3 — cleanup: remove the now-superseded `list_reviews()`,
+> - [x] Phase 3 — cleanup: remove the now-superseded `list_reviews()`,
 >       update `CLAUDE.md`/`README.md` to describe the final shape
 
 ## Context
@@ -236,11 +236,18 @@ listing and that the poll's `query_id`/`page` round-trip correctly.
       bullet, and the "Known gaps" listing-pagination bullet updated to
       describe the final implemented shape and the accepted count-cache
       staleness limitation (TTL-bounded, not event-invalidated).
-- [ ] `README.md` — still describes create/decision/cancel + the Phase 1
-      `POST /reviews/search` examples; not yet updated for the BFF-side
-      shape (`_UI_PAGE_SIZE`, query_id round-tripping) since that's UI
-      behavior rather than something a curl example would show.
-- [ ] Sweep for any remaining reference to the old unpaginated
-      `list_reviews()` signature or bare-array `GET /reviews`-style
-      response shape in comments/docstrings, to confirm nothing was
-      missed.
+- [x] `README.md` — POC UI section now describes the 10-row pages,
+      Prev/Next, and the query_id cache-reuse mechanism (with a pointer
+      to this file for the full design and the operator-vs-manager
+      cache-safety distinction); also fixed an unrelated stale line
+      found in passing (Docker Postgres's host port, `5432` → `5433`,
+      predating this plan — see the "Move Docker Postgres off host port
+      5432" commit).
+- [x] Swept `review_approval/`, `README.md`, `CLAUDE.md` for remaining
+      references to the old unpaginated `list_reviews()` signature or
+      bare-array `GET /reviews`-style response shape — none left outside
+      this file's own historical narrative (the "Context"/Phase
+      write-ups above describe the *starting* state on purpose) and
+      `keycloak/INTEGRATION_PLAN.md`'s one incidental mention (a
+      completed, historical plan document for an unrelated effort;
+      deliberately left as-is rather than edited after the fact).

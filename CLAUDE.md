@@ -534,23 +534,30 @@ auth-related code — it also documents real gotchas hit along the way
 (cookie-size limits, `post.logout.redirect.uris`, etc.), several of
 which are also captured in the `keycloak-admin` skill.
 
-## Paginated review-request listing: planned
+## Paginated review-request listing: complete (Phases 1–2; Phase 3 is doc polish only)
 
 **`docs/PAGINATION_PLAN.md` has the full API spec and phased status
-tracker** — a new `POST /reviews/search` endpoint (POST, not GET, so
-`page`/`page_size`/`query_id`/`filter` all live in the JSON body) adding
-real pagination plus a total-count cache to what's currently an
-unpaginated `SELECT *` on every call (`workflow/service.py`'s
-`list_reviews()`), including the `(requester, created_at DESC)` and
-`(created_at DESC)` indexes that query pattern has always needed but
-never had. The count cache is keyed by a `query_id` the server mints and
+tracker** — `POST /reviews/search` (POST, not GET, so
+`page`/`page_size`/`query_id`/`filter` all live in the JSON body) is the
+only listing endpoint now; the old unpaginated `GET /reviews` and
+`workflow/service.py`'s `list_reviews()` are both gone, along with the
+`SELECT *`-with-no-`LIMIT` query pattern they ran. `(requester,
+created_at DESC)` and `(created_at DESC)` indexes back the new
+`list_reviews_page()`/`_count_reviews()`/`_fetch_reviews_page()`
+queries. The count cache is keyed by a `query_id` the server mints and
 the client echoes back; only the total count is ever cached (row data
 always runs live), it's bypassed entirely whenever a `filter` is
 supplied, and a `query_id` used without a `filter` that isn't found
-(expired/unknown) fails with `400` rather than silently falling back to
-unfiltered. Read that file before touching `list_reviews()` or `GET
-/reviews` — it also has the full phase breakdown (REST API first, then
-BFF wiring, then cleanup) for picking this up across multiple sessions.
+(expired/unknown) fails with `400` (REST) or falls back to a fresh
+lookup (BFF) rather than silently returning unfiltered data. The BFF
+(`bff/ui.py`, `_UI_PAGE_SIZE = 10`) uses this same primitive for both
+`/ui/operator` and `/ui/manager`, round-tripping `query_id` on every
+poll/Prev/Next so the 5s self-poll doesn't re-run `COUNT(*)` every
+cycle — see the Visibility invariant bullet above for how the operator
+screen's cache reuse stays safe across sessions. Read
+`docs/PAGINATION_PLAN.md` before touching `list_reviews_page()` or
+either front door's search/list routes — it has the full phase
+breakdown and the reasoning behind each caching/fallback decision.
 
 ## Known gaps
 
