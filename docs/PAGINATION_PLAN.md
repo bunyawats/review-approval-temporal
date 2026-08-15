@@ -5,7 +5,7 @@
 > file (no dependency on `~/.claude/plans/`, which isn't part of this
 > repo and isn't guaranteed to survive across machines/sessions).
 >
-> - [ ] Phase 1 — schema indexes, `workflow/service.py` pagination +
+> - [x] Phase 1 — schema indexes, `workflow/service.py` pagination +
 >       count-cache core, `POST /reviews/search` on the REST API, tests
 > - [ ] Phase 2 — BFF wiring (`/ui/operator/list`, `/ui/manager/list`),
 >       pagination controls in the templates, 5s poll carries

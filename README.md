@@ -420,6 +420,27 @@ curl -X POST http://localhost:8000/reviews/<request_id>/cancel \
   -d '{"comment": "Submitted by mistake"}'
 ```
 
+List with pagination (as either role -- `POST`, not `GET`, so `page`/
+`page_size`/`query_id`/`filter` all live in the JSON body):
+
+```bash
+curl -X POST http://localhost:8000/reviews/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"page": 0, "page_size": 10, "filter": {"review_type": "purchase_order"}}'
+```
+
+The response's `query_id` can be replayed (with `filter` omitted) to page
+through the same result set without re-running `COUNT(*)`, as long as
+it's within the 30s cache TTL:
+
+```bash
+curl -X POST http://localhost:8000/reviews/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"page": 1, "query_id": "<query_id from previous response>"}'
+```
+
 You can also watch the workflow execute live in the Temporal Web UI at
 `http://localhost:8233`.
 

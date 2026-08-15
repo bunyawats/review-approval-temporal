@@ -9,13 +9,14 @@ sync on what's actually allowed.
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import asyncpg
 from temporalio.client import Client
 
 from review_approval.workflow.schemas import validate_payload
-from review_approval.workflow.task_queues import task_queue_for_review_type
+from review_approval.workflow.task_queues import KNOWN_REVIEW_TYPES, task_queue_for_review_type
 from review_approval.workflow.workflows import ReviewApprovalWorkflow, ReviewRequestInput
 
 # client.start_workflow()/handle.signal() only wait for Temporal to accept
@@ -97,6 +98,124 @@ async def list_reviews(
                 "SELECT * FROM review_requests ORDER BY created_at DESC"
             )
     return [dict(r) for r in rows]
+
+
+_QUERY_CACHE_TTL_S = 30.0
+_DEFAULT_PAGE_SIZE = 20
+_MAX_PAGE_SIZE = 100
+
+# query_id -> (filter, total, expires_at). In-process only, deliberately --
+# a query_id minted on one Kubernetes replica is just a cache miss on
+# another, never a wrong answer, so this is correct today without a shared
+# cache (Redis etc.), which would be a future option, not needed now. Same
+# "deliberate simplification" as the UMA permission-check caching gap noted
+# in CLAUDE.md's "Known gaps".
+_query_cache: dict[str, tuple[dict[str, Optional[str]], int, float]] = {}
+
+
+@dataclass
+class PagedReviews:
+    query_id: str
+    page: int
+    page_size: int
+    filter: dict[str, Optional[str]]
+    total: int
+    items: list[dict]
+
+
+def _cache_get(query_id: str) -> Optional[tuple[dict[str, Optional[str]], int]]:
+    entry = _query_cache.get(query_id)
+    if entry is None:
+        return None
+    filter_, total, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _query_cache.pop(query_id, None)
+        return None
+    return filter_, total
+
+
+def _cache_put(filter_: dict[str, Optional[str]], total: int) -> str:
+    query_id = str(uuid.uuid4())
+    _query_cache[query_id] = (filter_, total, time.monotonic() + _QUERY_CACHE_TTL_S)
+    return query_id
+
+
+def _where_clause(filter_: dict[str, Optional[str]]) -> tuple[str, list]:
+    conditions = []
+    params: list = []
+    if filter_.get("requester"):
+        params.append(filter_["requester"])
+        conditions.append(f"requester = ${len(params)}")
+    if filter_.get("review_type"):
+        params.append(filter_["review_type"])
+        conditions.append(f"review_type = ${len(params)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    return where, params
+
+
+async def _count_reviews(pool: asyncpg.Pool, filter_: dict[str, Optional[str]]) -> int:
+    where, params = _where_clause(filter_)
+    async with pool.acquire() as conn:
+        return await conn.fetchval(f"SELECT COUNT(*) FROM review_requests {where}", *params)
+
+
+async def _fetch_reviews_page(
+    pool: asyncpg.Pool, filter_: dict[str, Optional[str]], page: int, page_size: int
+) -> list[dict]:
+    where, params = _where_clause(filter_)
+    params.extend([page_size, page * page_size])
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT * FROM review_requests {where} "
+            f"ORDER BY created_at DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}",
+            *params,
+        )
+    return [dict(r) for r in rows]
+
+
+async def list_reviews_page(
+    pool: asyncpg.Pool,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+    query_id: Optional[str] = None,
+    filter: Optional[dict[str, Optional[str]]] = None,
+) -> PagedReviews:
+    page = 0 if page is None else page
+    if page < 0:
+        raise ValueError("page must be >= 0")
+    page_size = _DEFAULT_PAGE_SIZE if page_size is None else page_size
+    page_size = max(1, min(page_size, _MAX_PAGE_SIZE))
+
+    if filter:
+        review_type = filter.get("review_type")
+        if review_type is not None and review_type not in KNOWN_REVIEW_TYPES:
+            raise ValueError(f"unknown review_type: {review_type}")
+        resolved_filter: dict[str, Optional[str]] = {
+            "requester": filter.get("requester"),
+            "review_type": review_type,
+        }
+        total = await _count_reviews(pool, resolved_filter)
+        resolved_query_id = _cache_put(resolved_filter, total)
+    elif query_id:
+        cached = _cache_get(query_id)
+        if cached is None:
+            raise ValueError("query_id not found or expired -- resend filter to start a new query")
+        resolved_filter, total = cached
+        resolved_query_id = query_id
+    else:
+        resolved_filter = {"requester": None, "review_type": None}
+        total = await _count_reviews(pool, resolved_filter)
+        resolved_query_id = _cache_put(resolved_filter, total)
+
+    items = await _fetch_reviews_page(pool, resolved_filter, page, page_size)
+    return PagedReviews(
+        query_id=resolved_query_id,
+        page=page,
+        page_size=page_size,
+        filter=resolved_filter,
+        total=total,
+        items=items,
+    )
 
 
 async def get_review(pool: asyncpg.Pool, request_id: str) -> Optional[dict]:

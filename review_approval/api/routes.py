@@ -33,6 +33,18 @@ class CancelRequest(BaseModel):
     comment: str = ""
 
 
+class ReviewSearchFilter(BaseModel):
+    requester: Optional[str] = None
+    review_type: Optional[str] = None
+
+
+class ReviewSearchRequest(BaseModel):
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+    query_id: Optional[str] = None
+    filter: Optional[ReviewSearchFilter] = None
+
+
 @router.post("/reviews", status_code=201)
 async def create_review(
     request: Request,
@@ -140,3 +152,30 @@ async def submit_decision(
 @router.get("/reviews")
 async def list_reviews(request: Request, user: dict = Depends(get_current_user)):
     return await service.list_reviews(request.app.state.pg_pool)
+
+
+@router.post("/reviews/search")
+async def search_reviews(
+    body: ReviewSearchRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    filter_dict = body.filter.model_dump() if body.filter else None
+    try:
+        result = await service.list_reviews_page(
+            request.app.state.pg_pool,
+            page=body.page,
+            page_size=body.page_size,
+            query_id=body.query_id,
+            filter=filter_dict,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "query_id": result.query_id,
+        "page": result.page,
+        "page_size": result.page_size,
+        "filter": result.filter,
+        "total": result.total,
+        "items": result.items,
+    }

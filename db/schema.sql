@@ -27,3 +27,10 @@ CREATE TABLE IF NOT EXISTS review_requests (
 
 CREATE INDEX IF NOT EXISTS idx_review_requests_status ON review_requests (status);
 CREATE INDEX IF NOT EXISTS idx_review_requests_type ON review_requests (review_type);
+-- Both support list_reviews_page()'s ORDER BY created_at DESC, the
+-- first indexed (requester-filtered, i.e. the operator screens) and
+-- the second unindexed (unfiltered, i.e. the manager screens).
+CREATE INDEX IF NOT EXISTS idx_review_requests_requester_created_at
+    ON review_requests (requester, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_requests_created_at
+    ON review_requests (created_at DESC);
