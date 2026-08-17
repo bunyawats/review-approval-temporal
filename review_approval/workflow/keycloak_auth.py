@@ -59,6 +59,7 @@ def decode_token(token: str) -> dict:
         signing_key.key,
         algorithms=["RS256"],
         issuer=_keycloak_issuer(),
+        leeway=5,  # tolerate small clock skew between this host and Keycloak on iat/exp/nbf
         options={"verify_aud": False},  # set an audience and verify it in production
     )
 
