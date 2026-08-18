@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 
 import asyncpg
 from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from review_approval.workflow.schemas import validate_payload
 from review_approval.workflow.task_queues import KNOWN_REVIEW_TYPES, task_queue_for_review_type
@@ -209,6 +210,61 @@ async def get_review(pool: asyncpg.Pool, request_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def _reconcile_missing_workflow(pool: asyncpg.Pool, request_id: str) -> None:
+    """Recover from a Temporal admin deleting the workflow execution out from
+    under a still-PENDING_REVIEW row (`temporal workflow delete`, not just a
+    cancel/terminate) -- there is no workflow left to signal, and no
+    execution left to host a persist_cancel activity through, so this writes
+    directly to Postgres instead of going through the normal
+    workflow/activity path (the one deliberate exception to "activities.py
+    is the only file allowed to talk to Postgres": that rule is about
+    durable writes going through Temporal, which is meaningless once
+    Temporal's own record of the execution no longer exists).
+
+    closed_at is left NULL, not now() -- unlike workflows.py's native-cancel
+    handling, there's no Temporal-side event to anchor a real timestamp to;
+    we only found out the workflow was gone whenever this happened to run.
+
+    workflow_id is also cleared to NULL -- it can no longer be associated
+    with any real Temporal execution (nothing to `get_workflow_handle()`
+    against), so keeping the old id around would be misleading rather than
+    just unavailable.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE review_requests
+            SET status = 'CANCELLED',
+                closed_status = 'CANCELLED',
+                closed_by = 'temporal-admin',
+                closed_comment = 'workflow transaction not found',
+                closed_at = NULL,
+                workflow_id = NULL
+            WHERE id = $1 AND status = 'PENDING_REVIEW'
+            """,
+            request_id,
+        )
+
+
+async def _signal_or_reconcile(
+    pool: asyncpg.Pool, handle, request_id: str, signal, args: list
+) -> None:
+    """Shared by every signal-sending mutation below: send the signal, but
+    if Temporal reports the workflow no longer exists (RPCError NOT_FOUND --
+    see _reconcile_missing_workflow's docstring for why), self-heal the row
+    instead of letting a raw RPCError surface as an unhandled 500.
+    """
+    try:
+        await handle.signal(signal, args=args)
+    except RPCError as e:
+        if e.status != RPCStatusCode.NOT_FOUND:
+            raise
+        await _reconcile_missing_workflow(pool, request_id)
+        raise ValueError(
+            "this review's Temporal workflow no longer exists -- it has been marked cancelled"
+        )
+
+
 async def update_review(
     client: Client,
     pool: asyncpg.Pool,
@@ -225,7 +281,9 @@ async def update_review(
         raise ValueError("this review is no longer editable")
     validated = validate_payload(record["review_type"], new_payload)
     handle = client.get_workflow_handle(workflow_id(request_id))
-    await handle.signal(ReviewApprovalWorkflow.update_payload, validated)
+    await _signal_or_reconcile(
+        pool, handle, request_id, ReviewApprovalWorkflow.update_payload, [validated]
+    )
     # signal() only confirms Temporal accepted it -- wait for persist_update
     # to actually write the new payload before returning.
     await _wait_until(pool, request_id, lambda record: record["payload"] == validated)
@@ -248,8 +306,12 @@ async def cancel_review(
     if record["status"] != "PENDING_REVIEW":
         raise ValueError("this review is no longer cancellable")
     handle = client.get_workflow_handle(workflow_id(request_id))
-    await handle.signal(
-        ReviewApprovalWorkflow.cancel_request, args=[requester, comment]
+    await _signal_or_reconcile(
+        pool,
+        handle,
+        request_id,
+        ReviewApprovalWorkflow.cancel_request,
+        [requester, comment],
     )
     # signal() only confirms Temporal accepted it -- wait for persist_cancel
     # to actually write status='CANCELLED' before returning.
@@ -272,8 +334,12 @@ async def submit_decision(
     if record["status"] != "PENDING_REVIEW":
         raise ValueError("this review has already been decided")
     handle = client.get_workflow_handle(workflow_id(request_id))
-    await handle.signal(
-        ReviewApprovalWorkflow.submit_decision, args=[decision, closed_by, comment]
+    await _signal_or_reconcile(
+        pool,
+        handle,
+        request_id,
+        ReviewApprovalWorkflow.submit_decision,
+        [decision, closed_by, comment],
     )
     # signal() only confirms Temporal accepted it -- wait for persist_decision
     # to actually write the new status before returning.

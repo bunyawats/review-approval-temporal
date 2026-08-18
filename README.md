@@ -48,6 +48,12 @@ bounded loop before answering the caller.
 - **`workflow/workflows.py`** — `ReviewApprovalWorkflow`. Payload-agnostic:
   it carries `review_type` + `payload` through untouched. Waits durably on
   a signal for the Manager's decision, or the requester's cancellation.
+  Also recovers gracefully from a native Temporal *cancel* (e.g. the
+  Web UI's Cancel button, not our own signal) via a `try`/`except
+  asyncio.CancelledError` around that wait, so the Postgres row still ends
+  up `CANCELLED` instead of orphaned at `PENDING_REVIEW` — see `CLAUDE.md`
+  for the full mechanism and why a Temporal *terminate* can't be handled
+  the same way.
 - **`workflow/activities.py`** — the only code that touches Postgres.
 - **`workflow/worker.py`** — long-lived process that executes
   workflow/activity code. `WORKER_MODE` env var (`both` / `workflow` /
@@ -62,7 +68,11 @@ bounded loop before answering the caller.
   status checks, starts/signals workflows). Neither front door talks to
   Temporal or Postgres directly — only this module does, which is what
   keeps `bff/` and `api/` from drifting out of sync on what's actually
-  allowed.
+  allowed. Also recovers from a *deleted* workflow execution (a Temporal
+  admin ran `temporal workflow delete` on it, not just cancel/terminate) —
+  self-heals the row straight to `CANCELLED` the next time someone tries
+  to act on it, since there's no workflow execution left to signal at
+  all. See `CLAUDE.md` for the full mechanism.
 - **`api/`** — the JSON REST surface. Validates Keycloak JWTs, enforces
   fine-grained permissions (`Create_Request`, `Update_Request`,
   `Cancel_Request`, `Approve_Request`, `Reject_Request`) rather than
@@ -82,7 +92,9 @@ bounded loop before answering the caller.
   routers (`bff.ui`, `bff.sandbox`, `api.routes`).
 - **`db/schema.sql`** — Postgres table for listing/reporting/audit.
   Temporal is the source of truth for *live* state; Postgres is the
-  queryable record.
+  queryable record. `workflow_id` is nullable — cleared back to `NULL`
+  when a row's underlying Temporal execution has been deleted and no
+  longer exists to point at.
 
 Adding a new review type touches two files: a Pydantic model in
 `review_approval/workflow/schemas.py`, and its type string added to
@@ -490,6 +502,12 @@ simple.
 - No timeout on "wait for Manager decision" — consider adding a
   `workflow.wait_condition(..., timeout=...)` plus a reminder/escalation
   activity.
+- A native Temporal **cancel** is recovered gracefully; a **terminate** is
+  not, and can't be from inside the workflow (no event is ever delivered
+  to catch) — prefer cancel over terminate on this app's workflows. A
+  deleted workflow execution is recovered too, but only lazily, the next
+  time someone acts on the affected row — not proactively on list
+  screens. See `CLAUDE.md`'s "Known gaps" for the full detail.
 - No notification step (email/Slack) on request creation or decision.
 - Adding a review type with no worker actually polling its queue leaves
   requests stuck at `PENDING_REVIEW` forever with no error anywhere.

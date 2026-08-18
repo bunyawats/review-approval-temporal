@@ -7,6 +7,7 @@ happens in the BFF before the workflow is even started/signaled. That
 keeps this file stable no matter how many review types get added later.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Optional
@@ -60,9 +61,28 @@ class ReviewApprovalWorkflow:
         self._closed_comment: Optional[str] = None
         self._decision_received = False
         self._cancelled = False
+        self._closing = False
 
     def _is_final(self) -> bool:
         return self._decision_received or self._cancelled
+
+    def _claim_final(self) -> bool:
+        # Checking _is_final() and then, after an `await`, setting
+        # _decision_received/_cancelled True is a check-then-act race: two
+        # terminal-transition paths (a real signal and a native Temporal
+        # cancel, or two real signals) can both observe _is_final() as
+        # False before either has actually persisted anything, since
+        # signal handlers and run()'s except block interleave at await
+        # points rather than running atomically. _closing is set
+        # synchronously, with no await between the check and the set, so
+        # only the first caller ever gets True -- everyone else (including
+        # a caller that arrives while the winner is mid-`await
+        # workflow.execute_activity(persist_*)`) bails out immediately
+        # instead of also scheduling a conflicting persist_* activity.
+        if self._is_final() or self._closing:
+            return False
+        self._closing = True
+        return True
 
     @workflow.run
     async def run(self, req: ReviewRequestInput) -> ReviewStatus:
@@ -86,7 +106,38 @@ class ReviewApprovalWorkflow:
         # No polling, no timers burning CPU. Woken by either signal below.
         # Persistence for both outcomes happens inside the signal handlers
         # themselves, so it's guaranteed to complete before this returns.
-        await workflow.wait_condition(self._is_final)
+        #
+        # A native Temporal cancel (e.g. cancelled directly via the Web UI
+        # or CLI, rather than through our own cancel_request signal) is
+        # delivered here as asyncio.CancelledError, not through either
+        # signal handler -- persist_cancel would otherwise never run, and
+        # the Postgres row would stay stuck at PENDING_REVIEW forever even
+        # though Temporal considers the execution finished. Recover by
+        # doing the same persistence a real cancel_request would have
+        # done, attributed to Temporal itself, then let run() complete
+        # normally (not re-raised) so this converges on the same
+        # Completed/CANCELLED outcome cancel_request produces, instead of
+        # a bare Temporal-native Canceled status.
+        try:
+            await workflow.wait_condition(self._is_final)
+        except asyncio.CancelledError:
+            if self._claim_final():
+                await workflow.execute_activity(
+                    persist_cancel,
+                    PersistCancelInput(
+                        request_id=self._request_id,
+                        closed_by="temporal-admin",
+                        closed_comment="forced by temporal system",
+                        closed_at=workflow.now(),
+                    ),
+                    start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY_POLICY,
+                )
+                self._cancelled = True
+                self._status = "CANCELLED"
+                self._closed_by = "temporal-admin"
+                self._closed_status = "CANCELLED"
+                self._closed_comment = "forced by temporal system"
 
         return ReviewStatus(
             status=self._status,
@@ -99,9 +150,10 @@ class ReviewApprovalWorkflow:
     async def submit_decision(
         self, decision: str, manager_id: str, comment: str = ""
     ) -> None:
-        if self._is_final():
+        if not self._claim_final():
             return  # already decided/cancelled once; ignore late signals
         if decision not in VALID_DECISIONS:
+            self._closing = False  # this attempt never actually finalized
             raise ApplicationError(f"invalid decision: {decision}")
         await workflow.execute_activity(
             persist_decision,
@@ -134,7 +186,7 @@ class ReviewApprovalWorkflow:
 
     @workflow.signal
     async def cancel_request(self, cancelled_by: str, comment: str = "") -> None:
-        if self._is_final():
+        if not self._claim_final():
             return  # already decided/cancelled; nothing to cancel
         await workflow.execute_activity(
             persist_cancel,

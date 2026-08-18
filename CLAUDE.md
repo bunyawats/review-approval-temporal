@@ -76,9 +76,51 @@ or `bff/` respectively; don't put front-door-specific logic in
   `payload: dict[str, Any]`, and never inspects the dict's contents. All
   payload-shape validation belongs in `workflow/schemas.py`. Terminal
   states are `APPROVED`, `REJECTED`, `CANCELLED`, reached via the
-  `submit_decision` and `cancel_request` signals; `_is_final()` guards
-  every signal handler against acting twice. `update_payload` is only
-  valid pre-decision.
+  `submit_decision` and `cancel_request` signals; `_claim_final()` guards
+  every terminal-transition path against acting twice. `update_payload` is
+  only valid pre-decision.
+  **A native Temporal cancel (the Web UI's or CLI's Cancel button/command
+  — `CancelWorkflowExecution`, distinct from our own `cancel_request`
+  signal) is caught, not left to orphan the Postgres row.** It's delivered
+  as `asyncio.CancelledError` at `run()`'s `await
+  workflow.wait_condition(self._is_final)` (confirmed by reading the SDK's
+  own `wait_condition` implementation, not assumed); an uncaught
+  `except`-less version of this leaves the workflow `Canceled` in Temporal
+  while Postgres stays stuck at `PENDING_REVIEW` forever, since
+  `persist_cancel` — the only thing that writes `status='CANCELLED'` —
+  lives inside the `cancel_request` signal handler, which a native cancel
+  never invokes. The `except asyncio.CancelledError` block runs the same
+  `persist_cancel` activity itself, attributed to `closed_by=
+  "temporal-admin"`, `closed_comment="forced by temporal system"`,
+  `closed_at=workflow.now()` (the deterministic, replay-safe clock,
+  captured at the moment the cancellation was observed — not real
+  wall-clock time, which the workflow sandbox disallows), and does **not**
+  re-raise — `run()` falls through to its normal `return`, so the
+  execution ends `Completed` in Temporal, converging on the exact same
+  outcome `cancel_request` produces rather than a differently-shaped
+  `Canceled` status. Verified end to end against a real local Temporal
+  server (`temporal workflow cancel`, and separately via the Web UI's
+  Cancel button): Postgres lands `CANCELLED`/`temporal-admin`/`forced by
+  temporal system` with a real timestamp, and a subsequent decision
+  attempt on that request cleanly hits the normal "already been decided"
+  `ValueError` instead of an unhandled 500.
+  **`_claim_final()`** (replacing a bare `_is_final()` check in
+  `submit_decision`, `cancel_request`, and this `except` block) closes a
+  narrower check-then-act race those three terminal-transition paths would
+  otherwise share: each does `if self._is_final(): return` and only
+  *later*, after an `await workflow.execute_activity(persist_*)`, sets
+  `_decision_received`/`_cancelled` — since signal handlers and `run()`'s
+  `except` block interleave at await points rather than executing
+  atomically, two paths (e.g. a real `submit_decision` signal landing in
+  the same window as a native cancel) could both observe `_is_final() ==
+  False` before either has actually persisted anything, and both schedule
+  conflicting `persist_*` activities. `_claim_final()` sets a `_closing`
+  flag **synchronously, with no `await` in between the check and the
+  set**, so only the first caller ever proceeds; `submit_decision`
+  explicitly resets `_closing = False` on its invalid-decision path so a
+  bad decision value doesn't permanently lock out a legitimate later
+  signal. `update_payload` is untouched — it never transitions to a
+  terminal state, so there's nothing to race over there.
 - **`workflow/activities.py`** — the *only* file allowed to talk to
   Postgres. Workflow code never calls asyncpg directly; it goes through
   `workflow.execute_activity`. One activity per state-changing operation
@@ -135,6 +177,41 @@ or `bff/` respectively; don't put front-door-specific logic in
   operation was never abandoned, only the client-side wait for it gave
   up. Any new mutating capability added to this file needs the same
   treatment — don't return until the caller can actually see the effect.
+  **`_signal_or_reconcile()`/`_reconcile_missing_workflow()`** recover from
+  a *Temporal admin deleting the workflow execution entirely*
+  (`temporal workflow delete`, not cancel/terminate) while a row is still
+  `PENDING_REVIEW` — a strictly harder case than the native-cancel handling
+  in `workflows.py`, since there's no workflow execution left at all for
+  any code to run inside; the recovery has to live here instead.
+  `update_review`/`cancel_review`/`submit_decision` all route their
+  `handle.signal(...)` call through `_signal_or_reconcile()`, which catches
+  `temporalio.service.RPCError` specifically when `.status ==
+  RPCStatusCode.NOT_FOUND` (confirmed by reproducing this directly against
+  a real deleted workflow — signaling a deleted workflow ID raises exactly
+  this, not some other exception shape) and calls
+  `_reconcile_missing_workflow()`, then raises a plain `ValueError` so both
+  front doors render their normal friendly error instead of a raw 500.
+  `_reconcile_missing_workflow()` writes `status='CANCELLED'`,
+  `closed_by='temporal-admin'`, `closed_comment='workflow transaction not
+  found'`, `closed_at=NULL`, `workflow_id=NULL` **directly via `asyncpg`,
+  bypassing the normal activity path** — the one deliberate exception to
+  "`activities.py` is the only file allowed to talk to Postgres" (see that
+  bullet above): that rule is about durable writes going through Temporal,
+  which is meaningless once Temporal's own record of the execution no
+  longer exists to run a `persist_cancel` activity through.
+  `closed_at` stays `NULL` (not `now()`) since there's no Temporal-side
+  event to anchor a real timestamp to — unlike `workflows.py`'s
+  `workflow.now()` for a native cancel, we only find out the workflow is
+  gone whenever a user next happens to act on the row, not when it
+  actually disappeared. This also means the recovery is **lazy/reactive,
+  not proactive**: the row still displays as a normal actionable
+  `PENDING_REVIEW` item until someone next tries to edit/cancel/decide it
+  and triggers the `NOT_FOUND` — there's no background job scanning for
+  this. Verified end to end against a real deleted workflow: the first
+  action attempt gets `400 "this review's Temporal workflow no longer
+  exists -- it has been marked cancelled"` and the row flips to
+  `CANCELLED`; a second attempt cleanly hits the ordinary "already been
+  decided" `ValueError` instead.
 - **`workflow/schemas.py`** — registry of Pydantic models keyed by
   `review_type`. Adding a review type touches two files: a model +
   registry entry here, and the type string added to `KNOWN_REVIEW_TYPES`
@@ -353,11 +430,21 @@ or `bff/` respectively; don't put front-door-specific logic in
 - **`db/schema.sql`** — Postgres is the queryable/audit record; the JSON
   API's `POST /reviews/search` and the UI's list screens read from it
   directly (reads only — writes always go through a workflow
-  signal/activity).
+  signal/activity, with one deliberate exception — see `service.py`'s
+  `_reconcile_missing_workflow()` above).
   Temporal is the source of truth for *live* workflow state. Not part of
   the `review_approval` Python package and never copied into the app's
   Docker image — only the `postgres` service in `docker-compose.yml`
   reads it, via bind mount.
+  **`workflow_id` is nullable** (`TEXT UNIQUE`, not `TEXT NOT NULL
+  UNIQUE`) — set back to `NULL` by `_reconcile_missing_workflow()` when a
+  Temporal admin deletes the underlying execution, since the id no longer
+  points at anything real. Deliberately `NULL`, not a sentinel string like
+  `"N/A"`: the column is `UNIQUE`, and Postgres treats every `NULL` as
+  distinct under a `UNIQUE` constraint (confirmed via a live `ALTER TABLE
+  ... DROP NOT NULL` + write), so any number of reconciled rows can
+  coexist; a fixed sentinel would collision on the *second* one, and a
+  per-row sentinel (`"N/A-{request_id}"`) is just a worse-typed `NULL`.
 
 ## Invariants (not obvious from code alone — do not regress these)
 
@@ -389,15 +476,36 @@ or `bff/` respectively; don't put front-door-specific logic in
   four the same as a decision does, just with the requester as the actor
   and `CANCELLED` as the status. `cancel_request`'s signal signature is
   `(self, cancelled_by: str, comment: str = "")`. A fourth terminal
-  outcome, if ever added, should reuse these same four columns.
+  outcome, if ever added, should reuse these same four columns — already
+  validated by two more `CANCELLED`-reaching paths added since this was
+  written: a native Temporal cancel (`workflows.py`'s `except
+  asyncio.CancelledError`, `closed_by="temporal-admin"`,
+  `closed_comment="forced by temporal system"`, real `closed_at`) and a
+  deleted-workflow recovery (`service.py`'s
+  `_reconcile_missing_workflow()`, same `closed_by`, `closed_comment=
+  "workflow transaction not found"`, but **`closed_at` stays `NULL`** —
+  the one legitimate case where a terminal row doesn't have a real close
+  timestamp, since nothing in Temporal recorded when the workflow actually
+  disappeared. A reader relying on "`closed_at` is always set once
+  terminal" needs to special-case this.
 - Workflow ↔ activity data crosses via `@dataclass`, not raw dicts/tuples
   (see `PersistRequestInput`, `ReviewStatus`, etc.) — keep this pattern
   for any new activities.
 - Workflow IDs are always `f"review-{request_id}"` (see `workflow_id()`
-  in `workflow/service.py`). Don't introduce a second ID scheme.
-- All four signals (`submit_decision`, `update_payload`,
-  `cancel_request`) are idempotent/final-state-safe via the shared
-  `_is_final()` guard.
+  in `workflow/service.py`) for any row still associated with a real
+  Temporal execution — don't introduce a second ID scheme. The one
+  exception: `_reconcile_missing_workflow()` sets `workflow_id` back to
+  `NULL` once that execution has been deleted out from under the row (see
+  the `db/schema.sql` bullet above) — this is "no longer applicable," not
+  a second scheme.
+- All terminal-transition paths (`submit_decision`, `cancel_request`
+  signals, and `workflows.py`'s native-cancel `except` block) are
+  idempotent/final-state-safe via the shared `_claim_final()` guard — a
+  synchronous check-and-set (no `await` between checking and claiming),
+  not the plain `_is_final()` read this used to be, since two paths could
+  otherwise both observe "not yet final" before either had persisted
+  anything. `update_payload` still uses plain `_is_final()`: it never
+  transitions to a terminal state, so there's no claim to race over.
 - All activity calls use `start_to_close_timeout` + `RetryPolicy`.
 - Ownership/status checks live in `workflow/service.py`, not in either
   front door. Both `api/routes.py` and `bff/ui.py` translate the same
@@ -582,6 +690,30 @@ assumed). Not started; read that file before touching
   the stock image — deliberately not attempted; see the `temporal-ui`
   bullet under "Local dev: Docker Compose".
 - No timeout on "wait for Manager decision" — requests can wait forever.
+- **A native Temporal *cancel* is recovered gracefully (`workflows.py`'s
+  `except asyncio.CancelledError`); a native Temporal *terminate* is
+  not, and structurally can't be from inside the workflow.** Terminate
+  (`TerminateWorkflowExecution` — a separate Web UI button/CLI command
+  from Cancel) kills the execution immediately with no event delivered
+  into running workflow code at all — nothing to catch, by design (that's
+  the whole point of Terminate: an unconditional stop for a truly stuck
+  workflow, no negotiation). A Terminated request reproduces the exact
+  orphaning bug the Cancel handling fixed — stuck at `PENDING_REVIEW`
+  forever — with no workflow-side fix possible. Only an external
+  reconciliation process (outside Temporal, e.g. periodically diffing
+  `PENDING_REVIEW` rows against which workflow ids Temporal still knows
+  about) could catch this; not built. Operationally: prefer Cancel over
+  Terminate on this app's workflows unless a workflow is genuinely
+  unresponsive to a cooperative cancel.
+- **Deleted-workflow recovery (`service.py`'s
+  `_reconcile_missing_workflow()`) is lazy, not proactive.** A row whose
+  Temporal workflow was deleted (`temporal workflow delete`) still
+  displays as a normal actionable `PENDING_REVIEW` item — with live
+  Edit/Cancel/Approve/Reject buttons — until someone next actually tries
+  one of those actions and triggers the `RPCError`/`NOT_FOUND` that drives
+  the self-heal. List screens never proactively check whether a
+  `PENDING_REVIEW` row's workflow still exists, since that would mean a
+  Temporal `DescribeWorkflowExecution` call per row on every list render.
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.

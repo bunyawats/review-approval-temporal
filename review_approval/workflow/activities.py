@@ -7,6 +7,7 @@ side effects other than through workflow.execute_activity.
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 import asyncpg
@@ -92,6 +93,12 @@ class PersistCancelInput:
     request_id: str
     closed_by: str
     closed_comment: str
+    # Only set for a native Temporal cancellation (see workflows.py's
+    # wait_condition except clause) -- lets closed_at reflect the moment
+    # Temporal delivered the cancel rather than whenever this activity
+    # happens to run. Unset (None) for the normal signal-driven cancel
+    # path, which has no separate "cancel time" to reconcile against.
+    closed_at: Optional[datetime] = None
 
 
 @activity.defn
@@ -120,10 +127,11 @@ async def persist_cancel(inp: PersistCancelInput) -> None:
                 closed_status = 'CANCELLED',
                 closed_by = $2,
                 closed_comment = $3,
-                closed_at = now()
+                closed_at = COALESCE($4, now())
             WHERE id = $1
             """,
             inp.request_id,
             inp.closed_by,
             inp.closed_comment,
+            inp.closed_at,
         )
