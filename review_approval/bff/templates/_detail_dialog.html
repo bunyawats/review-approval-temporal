@@ -10,7 +10,7 @@
   to empty rather than requiring every caller to pass it.
 #}
 {% set permissions = permissions | default([]) %}
-{% set can_decide = role == "manager" and record.status == "PENDING_REVIEW" and ("Approve_Request" in permissions or "Reject_Request" in permissions) %}
+{% set can_decide = role == "manager" and record.status == "PENDING_REVIEW" and ("Approve" in permissions or "Reject" in permissions) %}
 <div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
   <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
     <h2 class="text-lg font-semibold mt-0 mb-4">Request Detail</h2>
@@ -67,16 +67,16 @@
 
         Approve/Reject are individually gated by permission (in addition
         to can_decide above), matching manager_decision()'s own
-        Approve_Request/Reject_Request check_permission() branch.
+        Approve/Reject check_permission() branch.
       #}
-      {% if "Reject_Request" in permissions %}
+      {% if "Reject" in permissions %}
       <button type="button"
         class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
         onclick="var c = document.getElementById('decision-comment-{{ record.id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: document.getElementById('review-btn-{{ record.id }}'), target: '#row-{{ record.id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {decision: 'REJECTED', comment: c}})">
         Reject
       </button>
       {% endif %}
-      {% if "Approve_Request" in permissions %}
+      {% if "Approve" in permissions %}
       <button type="button"
         class="px-3.5 py-2 text-sm font-medium rounded-md bg-green-600 text-white hover:bg-green-700"
         onclick="var c = document.getElementById('decision-comment-{{ record.id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/manager/{{ record.id }}/decision', {source: document.getElementById('review-btn-{{ record.id }}'), target: '#row-{{ record.id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {decision: 'APPROVED', comment: c}})">

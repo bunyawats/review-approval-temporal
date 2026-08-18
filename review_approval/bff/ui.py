@@ -183,7 +183,7 @@ async def operator_list(
 
 
 @router.get("/operator/new-form", response_class=HTMLResponse)
-async def new_form(request: Request, user: dict = Depends(require_permission("Create_Request"))):
+async def new_form(request: Request, user: dict = Depends(require_permission("Create"))):
     return _render(
         request,
         "_form_dialog.html",
@@ -200,7 +200,7 @@ async def create_request(
     request: Request,
     review_type: str = Form(...),
     payload_json: str = Form(...),
-    user: dict = Depends(require_permission("Create_Request")),
+    user: dict = Depends(require_permission("Create")),
 ):
     client, pool = _clients(request)
     payload = _parse_payload_or_none(payload_json)
@@ -241,7 +241,7 @@ async def create_request(
 
 
 @router.get("/operator/{request_id}/edit-form", response_class=HTMLResponse)
-async def edit_form(request: Request, request_id: str, user: dict = Depends(require_permission("Update_Request"))):
+async def edit_form(request: Request, request_id: str, user: dict = Depends(require_permission("Update"))):
     _, pool = _clients(request)
     record = await service.get_review(pool, request_id)
     if record is None or record["requester"] != user["username"]:
@@ -264,7 +264,7 @@ async def update_request(
     request: Request,
     request_id: str,
     payload_json: str = Form(...),
-    user: dict = Depends(require_permission("Update_Request")),
+    user: dict = Depends(require_permission("Update")),
 ):
     client, pool = _clients(request)
     record = await service.get_review(pool, request_id)
@@ -307,7 +307,7 @@ async def update_request(
 
 
 @router.get("/operator/{request_id}/cancel-form", response_class=HTMLResponse)
-async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_permission("Cancel_Request"))):
+async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_permission("Cancel"))):
     _, pool = _clients(request)
     record = await service.get_review(pool, request_id)
     if record is None or record["requester"] != user["username"]:
@@ -324,7 +324,7 @@ async def cancel_request_route(
     request: Request,
     request_id: str,
     comment: str = Form(""),
-    user: dict = Depends(require_permission("Cancel_Request")),
+    user: dict = Depends(require_permission("Cancel")),
 ):
     client, pool = _clients(request)
     try:
@@ -407,7 +407,7 @@ async def manager_decision(
     # the submitted decision, so this can't be expressed as a single
     # Depends(require_permission(...)); check it explicitly instead.
     # Mirrors api/routes.py's submit_decision.
-    permission = "Approve_Request" if decision == "APPROVED" else "Reject_Request"
+    permission = "Approve" if decision == "APPROVED" else "Reject"
     await check_permission(user, permission)
     client, pool = _clients(request)
     try:

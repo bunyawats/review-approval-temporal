@@ -270,3 +270,52 @@ routes with real logged-in sessions from Phase 2's flow.
 - Sweep for any remaining reference to the old role-based model
   (`require_role`, `require_session_role`, `VALID_ROLES`) to confirm
   nothing was missed
+
+---
+
+## Addendum — Resource+Scope refactor (complete)
+
+**Goal**: collapse the 5 one-action-each Resources (`Create_Request`,
+`Update_Request`, `Cancel_Request`, `Approve_Request`, `Reject_Request`)
+built in Phase 1 into a single `RequestApproval` Resource carrying 5
+Scopes (`Create`, `Update`, `Cancel`, `Approve`, `Reject`), with role
+permissions configured at the Resource+Scope level via scope-type
+Permissions instead of resource-type ones. Same 5 grantable permissions,
+same 2 role Policies, no behavior change for end users — this is a pure
+Authorization-Services granularity refactor, done because Scopes are the
+correct primitive for "multiple actions on the same conceptual resource"
+and this project hadn't used that half of the model yet.
+
+**Empirically verified before any code changed** (this project's
+established discipline — see Phase 1's `TokenInvalid`/
+`PermissionCheckError` shape-confirmation above): recreated Keycloak
+with the new realm JSON, then replayed the exact UMA ticket exchange
+`get_permissions()` performs via `curl` for both `operator1` and
+`manager1`. Confirmed shape: `response_mode=permissions` returns **one
+entry per resource** (always exactly one here) with a `"scopes"` array
+of every granted scope name, e.g. `operator1` →
+`[{"rsname": "RequestApproval", "scopes": ["Cancel", "Create",
+"Update"]}]`. This is what `get_permissions()` was rewritten to flatten,
+instead of reading `rsname`.
+
+**Changed**:
+- `keycloak/import/myrealm-realm.json` — 5 `resources[]` → 1
+  (`RequestApproval` + 5 scopes); 5 `resource`-type Permissions → 5
+  `scope`-type Permissions (`config.resources: ["RequestApproval"]` +
+  `config.scopes: ["Create"]`). Policies unchanged.
+- `workflow/keycloak_auth.py`'s `get_permissions()` — flattens granted
+  `scopes` across returned permission entries instead of collecting
+  `rsname`. Return type stays `set[str]`; only the string values inside
+  it changed (`"Create_Request"` → `"Create"` etc.), so every caller's
+  structure was untouched — just the literal strings passed to
+  `require_permission(...)`/`check_permission(user, ...)` across
+  `api/routes.py`, `bff/ui.py`, and the 3 templates that gate button
+  visibility (`_detail_dialog.html`, `_manager_row.html`,
+  `_operator_row.html`).
+- `keycloak/list-permissions-by-role.sh` — now also resolves
+  `/policy/{id}/scopes` per permission (same Admin REST API pattern as
+  the pre-existing `/resources` call), so its output shows which scope
+  each permission grants.
+- Tests: `tests/unit/test_keycloak_auth.py`'s mocked UMA response and
+  `tests/integration/test_{api,bff}_permissions.py`'s literal permission
+  strings, updated to match. Full suite (58 tests) passes.

@@ -124,16 +124,26 @@ def test_decode_token_keycloak_issuer_unset(monkeypatch, rsa_keys):
 # ----------------------------------------------------------- get_permissions ----
 
 async def test_get_permissions_granted():
+    # Real shape confirmed empirically against a live instance: one entry
+    # per resource (always exactly one here -- a single "RequestApproval"
+    # resource carries all five scopes), with a "scopes" list of every
+    # granted scope name.
     with respx.mock:
         respx.post(f"{ISSUER}/protocol/openid-connect/token").mock(
             return_value=Response(
                 200,
-                json=[{"rsname": "Create_Request"}, {"rsname": "Update_Request"}],
+                json=[
+                    {
+                        "rsid": "b3c75c07-6191-46f5-bd63-fba3e0a8f6bf",
+                        "rsname": "RequestApproval",
+                        "scopes": ["Create", "Update"],
+                    }
+                ],
             )
         )
         perms = await keycloak_auth.get_permissions("some-token")
 
-    assert perms == {"Create_Request", "Update_Request"}
+    assert perms == {"Create", "Update"}
 
 
 async def test_get_permissions_zero_granted():

@@ -10,11 +10,10 @@
   the row's status -- defense in depth alongside the route-level
   require_permission() checks (see bff/ui.py's _user_permissions()).
   Independently gated (not "pending => both buttons") since a future
-  role could plausibly have one of Update_Request/Cancel_Request
-  without the other.
+  role could plausibly have one of Update/Cancel without the other.
 #}
-{% set can_edit = r.status == "PENDING_REVIEW" and "Update_Request" in permissions %}
-{% set can_cancel = r.status == "PENDING_REVIEW" and "Cancel_Request" in permissions %}
+{% set can_edit = r.status == "PENDING_REVIEW" and "Update" in permissions %}
+{% set can_cancel = r.status == "PENDING_REVIEW" and "Cancel" in permissions %}
 <tr id="row-{{ r.id }}">
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">

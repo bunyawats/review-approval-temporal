@@ -125,7 +125,7 @@ def test_manager_cannot_create():
             data={"review_type": "purchase_order", "payload_json": '{"vendor": "x", "amount": 1}'},
         )
         assert response.status_code == 403
-        assert "Create_Request" in response.json()["detail"]
+        assert "Create" in response.json()["detail"]
 
 
 # ------------------------------------------------------------- update/cancel ----
@@ -139,7 +139,7 @@ def test_manager_cannot_update():
             data={"payload_json": '{"vendor": "changed", "amount": 2}'},
         )
         assert response.status_code == 403
-        assert "Update_Request" in response.json()["detail"]
+        assert "Update" in response.json()["detail"]
 
 
 def test_operator_can_cancel_own_pending_request():
@@ -156,15 +156,15 @@ def test_manager_cannot_cancel():
     with _client_as("manager1") as manager:
         response = manager.post(f"/ui/operator/{request_id}/cancel", data={"comment": "not my job"})
         assert response.status_code == 403
-        assert "Cancel_Request" in response.json()["detail"]
+        assert "Cancel" in response.json()["detail"]
 
 
 # ------------------------------------------------------------------ decision ----
 
 def test_operator_cannot_reach_manager_decision():
     # manager_decision is gated by require_session_role("manager") first
-    # -- an operator session never even reaches the Approve_Request/
-    # Reject_Request permission check, unlike the REST API (which has
+    # -- an operator session never even reaches the Approve/
+    # Reject permission check, unlike the REST API (which has
     # no equivalent role gate on this route, only the permission check).
     with _client_as("operator1") as client:
         request_id = _create_as(client)

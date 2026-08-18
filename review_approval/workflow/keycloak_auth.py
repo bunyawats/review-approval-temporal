@@ -10,13 +10,13 @@ each front door maps failures from here into its own response style
 (api/auth.py -> HTTP status codes and JSON bodies; bff -> redirects to
 login or a re-rendered error fragment).
 
-The five permissions (Create_Request, Update_Request, Cancel_Request,
-Approve_Request, Reject_Request) are Keycloak Resources on the
-"review-approval" client, gated by role-based Policies via Permissions
--- not realm roles. They never appear in a plain access token's
-realm_access.roles claim; get_permissions() below is what actually
-checks them, via a UMA ticket exchange, a real (not cached) call to
-Keycloak per check. See the keycloak-admin skill and
+The five permissions (Create, Update, Cancel, Approve, Reject) are
+Authorization Services Scopes on a single "RequestApproval" Resource on
+the "review-approval" client, each gated by a role-based Policy via its
+own scope-type Permission -- not realm roles. They never appear in a
+plain access token's realm_access.roles claim; get_permissions() below
+is what actually checks them, via a UMA ticket exchange, a real (not
+cached) call to Keycloak per check. See the keycloak-admin skill and
 keycloak/import/myrealm-realm.json for the full structure.
 """
 
@@ -80,9 +80,17 @@ class PermissionCheckError(Exception):
 
 
 async def get_permissions(access_token: str) -> set[str]:
-    """Return the set of Resource names (e.g. "Create_Request") this
-    access token is currently granted, via a UMA ticket exchange against
-    the "review-approval" resource server.
+    """Return the set of Scope names (e.g. "Create") this access token is
+    currently granted on the "RequestApproval" resource, via a UMA
+    ticket exchange against the "review-approval" resource server.
+
+    Confirmed empirically (not assumed from docs) against a real
+    instance: response_mode=permissions returns one entry per *resource*
+    -- here always exactly one, since there's only one resource -- with a
+    "scopes" list of every granted scope name on it, e.g.
+    `[{"rsid": "...", "rsname": "RequestApproval", "scopes": ["Create",
+    "Update"]}]`. Flattening every entry's "scopes" (rather than reading
+    "rsname") is what makes this scope-level rather than resource-level.
 
     A token with zero granted permissions is NOT an error -- confirmed
     empirically against a real instance (not assumed from docs):
@@ -132,4 +140,7 @@ async def get_permissions(access_token: str) -> set[str]:
             f"unexpected {response.status_code} from Keycloak: {response.text}"
         )
 
-    return {perm["rsname"] for perm in response.json()}
+    granted: set[str] = set()
+    for perm in response.json():
+        granted.update(perm.get("scopes", []))
+    return granted

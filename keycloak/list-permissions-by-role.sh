@@ -1,11 +1,17 @@
 #!/bin/bash
 # Lists which Keycloak Authorization Services permissions (and the
-# Resources they cover) are granted by each realm role, by walking the
-# Policy -> dependentPolicies (Permissions) -> resources chain via the
-# Admin REST API. This is a *static config* view (what the current
-# Policy/Permission setup grants), not a live per-user check -- for
-# that, do a real UMA ticket exchange for a specific user's token
-# instead (see README.md's "Try it (JSON API)" section).
+# Resource+Scope pairs they cover) are granted by each realm role, by
+# walking the Policy -> dependentPolicies (Permissions) -> resources +
+# scopes chain via the Admin REST API. This is a *static config* view
+# (what the current Policy/Permission setup grants), not a live per-user
+# check -- for that, do a real UMA ticket exchange for a specific user's
+# token instead (see README.md's "Try it (JSON API)" section).
+#
+# The single "RequestApproval" resource carries all 5 scopes
+# (Create/Update/Cancel/Approve/Reject); each scope-type Permission binds
+# one scope to a role Policy, which is why this walks /scopes per
+# permission (analogous to the old resource-type /resources call) rather
+# than resolving distinct Resources per permission.
 #
 # Usage: ./list-permissions-by-role.sh [keycloak-base-url] [realm]
 # Defaults match this project's local dev setup.
@@ -56,7 +62,9 @@ for policy in policies:
         print('  (no permissions currently apply this policy)')
     for perm in permissions:
         resources = api(f\"/policy/{perm['id']}/resources\")
-        for res in resources:
-            print(f\"  {res['name']:20s} (via {perm['name']})\")
+        scopes = api(f\"/policy/{perm['id']}/scopes\")
+        resource_names = ', '.join(r['name'] for r in resources) or '(none)'
+        scope_names = ', '.join(s['name'] for s in scopes) or '(whole resource, no scope)'
+        print(f\"  {resource_names} -> scope: {scope_names:10s} (via {perm['name']})\")
     print()
 "

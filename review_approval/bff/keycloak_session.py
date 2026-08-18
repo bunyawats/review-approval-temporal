@@ -20,10 +20,12 @@ conflate them:
   its identity-only GET routes by nothing more than "is this a valid
   session" -- not a Phase 2 stopgap, a permanent, deliberate choice.
 - **`require_permission(permission)`** / **`check_permission(user,
-  permission)`** gate the five *mutating* actions (Create_Request etc.)
-  via a real UMA ticket exchange (workflow/keycloak_auth.get_permissions())
-  -- the same mechanism api/auth.py uses for the REST API. Added in
-  Phase 3; see keycloak/INTEGRATION_PLAN.md.
+  permission)`** gate the five *mutating* actions (Create, Update,
+  Cancel, Approve, Reject -- Scopes on the single "RequestApproval"
+  Resource) via a real UMA ticket exchange
+  (workflow/keycloak_auth.get_permissions()) -- the same mechanism
+  api/auth.py uses for the REST API. Added in Phase 3; see
+  keycloak/INTEGRATION_PLAN.md.
 
 No token refresh yet -- access tokens are short-lived (5 min, confirmed
 against this project's realm); once expired, the session is simply
@@ -222,9 +224,9 @@ async def check_permission(user: dict, permission: str) -> None:
 
     Callable directly from inside a route body (for routes that need to
     pick the required permission based on the request body -- see
-    manager_decision in ui.py, which needs Approve_Request or
-    Reject_Request depending on the submitted decision, mirroring
-    api/routes.py's submit_decision), or via the require_permission()
+    manager_decision in ui.py, which needs Approve or Reject depending
+    on the submitted decision, mirroring api/routes.py's
+    submit_decision), or via the require_permission()
     dependency factory below for the common single-fixed-permission
     case. Same shape as api/auth.py's check_permission() -- both wrap
     the same workflow/keycloak_auth.get_permissions().
@@ -247,7 +249,7 @@ async def check_permission(user: dict, permission: str) -> None:
 
 
 def require_permission(permission: str):
-    """FastAPI dependency factory: require_permission("Create_Request")
+    """FastAPI dependency factory: require_permission("Create")
 
     Gates the five mutating actions via a real UMA ticket exchange --
     see this module's docstring for how this differs from

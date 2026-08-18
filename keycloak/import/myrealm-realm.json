@@ -47,29 +47,16 @@
         "decisionStrategy": "UNANIMOUS",
         "resources": [
           {
-            "name": "Create_Request",
-            "displayName": "Create Request",
-            "ownerManagedAccess": false
-          },
-          {
-            "name": "Update_Request",
-            "displayName": "Update Request",
-            "ownerManagedAccess": false
-          },
-          {
-            "name": "Cancel_Request",
-            "displayName": "Cancel Request",
-            "ownerManagedAccess": false
-          },
-          {
-            "name": "Approve_Request",
-            "displayName": "Approve Request",
-            "ownerManagedAccess": false
-          },
-          {
-            "name": "Reject_Request",
-            "displayName": "Reject Request",
-            "ownerManagedAccess": false
+            "name": "RequestApproval",
+            "displayName": "Request Approval",
+            "ownerManagedAccess": false,
+            "scopes": [
+              {"name": "Create"},
+              {"name": "Update"},
+              {"name": "Cancel"},
+              {"name": "Approve"},
+              {"name": "Reject"}
+            ]
           }
         ],
         "policies": [
@@ -94,57 +81,62 @@
             }
           },
           {
-            "name": "Create_Request Permission",
+            "name": "Create Permission",
             "description": "Operator role may create requests.",
-            "type": "resource",
+            "type": "scope",
             "logic": "POSITIVE",
             "decisionStrategy": "UNANIMOUS",
             "config": {
-              "resources": "[\"Create_Request\"]",
+              "resources": "[\"RequestApproval\"]",
+              "scopes": "[\"Create\"]",
               "applyPolicies": "[\"Operator Policy\"]"
             }
           },
           {
-            "name": "Update_Request Permission",
+            "name": "Update Permission",
             "description": "Operator role may update requests.",
-            "type": "resource",
+            "type": "scope",
             "logic": "POSITIVE",
             "decisionStrategy": "UNANIMOUS",
             "config": {
-              "resources": "[\"Update_Request\"]",
+              "resources": "[\"RequestApproval\"]",
+              "scopes": "[\"Update\"]",
               "applyPolicies": "[\"Operator Policy\"]"
             }
           },
           {
-            "name": "Cancel_Request Permission",
+            "name": "Cancel Permission",
             "description": "Operator role may cancel requests.",
-            "type": "resource",
+            "type": "scope",
             "logic": "POSITIVE",
             "decisionStrategy": "UNANIMOUS",
             "config": {
-              "resources": "[\"Cancel_Request\"]",
+              "resources": "[\"RequestApproval\"]",
+              "scopes": "[\"Cancel\"]",
               "applyPolicies": "[\"Operator Policy\"]"
             }
           },
           {
-            "name": "Approve_Request Permission",
+            "name": "Approve Permission",
             "description": "Manager role may approve requests.",
-            "type": "resource",
+            "type": "scope",
             "logic": "POSITIVE",
             "decisionStrategy": "UNANIMOUS",
             "config": {
-              "resources": "[\"Approve_Request\"]",
+              "resources": "[\"RequestApproval\"]",
+              "scopes": "[\"Approve\"]",
               "applyPolicies": "[\"Manager Policy\"]"
             }
           },
           {
-            "name": "Reject_Request Permission",
+            "name": "Reject Permission",
             "description": "Manager role may reject requests.",
-            "type": "resource",
+            "type": "scope",
             "logic": "POSITIVE",
             "decisionStrategy": "UNANIMOUS",
             "config": {
-              "resources": "[\"Reject_Request\"]",
+              "resources": "[\"RequestApproval\"]",
+              "scopes": "[\"Reject\"]",
               "applyPolicies": "[\"Manager Policy\"]"
             }
           }

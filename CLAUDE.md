@@ -224,7 +224,7 @@ or `bff/` respectively; don't put front-door-specific logic in
   `require_permission(...)` (see `api/auth.py` below), never a role
   check. `POST /reviews/{id}/decision` is the one route needing **two**
   different permissions depending on the request body — `APPROVED` needs
-  `Approve_Request`, `REJECTED` needs `Reject_Request` — which a single
+  `Approve`, `REJECTED` needs `Reject` — which a single
   dependency can't express, so that route checks the permission matching
   the submitted `decision` value inside the handler itself rather than
   via the dependency list.
@@ -232,25 +232,34 @@ or `bff/` respectively; don't put front-door-specific logic in
   dependency (`require_permission(permission: str)`) for the JSON API —
   not a role check. Temporal has zero concept of roles or permissions;
   this is the sole enforcement point for this front door.
-  Uses Keycloak's Authorization Services (Resources/Policies/Permissions
-  — see the `keycloak-admin` skill for the general mechanism, JSON
-  shape, and UMA ticket exchange details), not composite roles:
-  `Operator`/`Manager` are plain realm roles; the five permissions
-  (`Create_Request`, `Update_Request`, `Cancel_Request`,
-  `Approve_Request`, `Reject_Request`) are Resources on the
-  `review-approval` client, gated by role-based Policies (`Operator
-  Policy`/`Manager Policy`) via matching Permissions — see the
-  `keycloak` bullet below for this project's exact structure.
+  Uses Keycloak's Authorization Services (Resources/Scopes/Policies/
+  Permissions — see the `keycloak-admin` skill for the general
+  mechanism, JSON shape, and UMA ticket exchange details), not composite
+  roles: `Operator`/`Manager` are plain realm roles; the five
+  permissions (`Create`, `Update`, `Cancel`, `Approve`, `Reject`) are
+  **Scopes on a single `RequestApproval` Resource** on the
+  `review-approval` client (refactored from 5 separate Resources — one
+  per action — to 1 Resource + 5 Scopes; see the `keycloak` bullet
+  below), gated by role-based Policies (`Operator Policy`/`Manager
+  Policy`) via matching **scope-type** Permissions (`config.resources:
+  ["RequestApproval"]` + `config.scopes: ["Create"]`, not
+  `config.resources: ["Create"]`) — see the `keycloak` bullet below for
+  this project's exact structure.
   **Consequence worth remembering when implementing
-  `require_permission()`**: since the five permissions are Resources,
-  not roles, they never appear in the plain access token's
+  `require_permission()`**: since the five permissions are Scopes, not
+  roles, they never appear in the plain access token's
   `realm_access.roles` claim — checking one needs a real UMA ticket
   exchange (a second Keycloak call, or a cached RPT), not just decoding
-  a different claim from the same token. Adding a new role (e.g.
-  `Auditor`) stays a pure Keycloak config change either way: new role +
-  new Policy + add that Policy to the relevant Permissions'
-  `applyPolicies` — no code here ever references role names, only
-  Resource names. `KEYCLOAK_ISSUER` is read lazily, on first actual call
+  a different claim from the same token. `get_permissions()` in
+  `workflow/keycloak_auth.py` reads the UMA response's per-resource
+  `scopes` array (confirmed empirically: `response_mode=permissions`
+  returns one entry per resource — always exactly one here — with a
+  `scopes` list of every granted scope name), not `rsname`, which is
+  what makes this scope-level rather than resource-level. Adding a new
+  role (e.g. `Auditor`) stays a pure Keycloak config change either way:
+  new role + new Policy + add that Policy to the relevant Permissions'
+  `applyPolicies` — no code here ever references role names, only Scope
+  names. `KEYCLOAK_ISSUER` is read lazily, on first actual call
   to a protected route, not at import time, so the app (including
   `/ui/*`, which has its own separate `require_session_role()`/
   `require_permission()` checks (see `bff/keycloak_session.py` below))
@@ -295,8 +304,8 @@ or `bff/` respectively; don't put front-door-specific logic in
   never Temporal/Postgres directly.
   **Permission enforcement (Phase 3)**: `new_form`/`create_request`,
   `edit_form`/`update_request`, and `cancel_form`/`cancel_request_route`
-  are gated by `Depends(require_permission("Create_Request"))` etc.;
-  `manager_decision` branches `Approve_Request`/`Reject_Request` via an
+  are gated by `Depends(require_permission("Create"))` etc.;
+  `manager_decision` branches `Approve`/`Reject` via an
   inline `check_permission()` call based on the submitted `decision`
   (can't be a single `Depends()` since the required permission depends
   on request body, same reasoning as `api/routes.py`'s `submit_decision`)
@@ -553,12 +562,15 @@ only** — not a preview of the Kubernetes shape below.
     `TemporalAdmin` (the last one gates Temporal Web UI login only — see
     the `temporal-ui` bullet below, not related to the REST/BFF
     permission model)
-  - 5 Resources on the `review-approval` client: `Create_Request`,
-    `Update_Request`, `Cancel_Request`, `Approve_Request`,
-    `Reject_Request`
+  - 1 Resource on the `review-approval` client, `RequestApproval`,
+    carrying 5 Scopes: `Create`, `Update`, `Cancel`, `Approve`, `Reject`
+    (refactored from 5 separate one-action-each Resources to this
+    single-Resource/multi-Scope shape — same 5 grantable permissions,
+    finer Authorization-Services granularity)
   - 2 role-based Policies (`Operator Policy`/`Manager Policy`) and 5
-    Permissions binding each Resource to the right one — Create/Update/
-    Cancel via Operator, Approve/Reject via Manager
+    **scope-type** Permissions (`"Create Permission"` etc.), each
+    binding one Scope on `RequestApproval` to the right Policy —
+    Create/Update/Cancel via Operator, Approve/Reject via Manager
   - `review-approval` is a confidential client, `secret:
     dev-secret-change-me` (fine for `start-dev`-only local dev, plainly
     checked into the JSON — never do this anywhere real)
@@ -569,15 +581,15 @@ only** — not a preview of the Kubernetes shape below.
     `Operator`, `manager1`/`manager2` → `Manager`, `temporal-admin1` →
     `TemporalAdmin`
   Verified end to end, not just configured: a real UMA ticket exchange
-  for `operator1` returns exactly `Create_Request`/`Update_Request`/
-  `Cancel_Request`, `manager1` exactly `Approve_Request`/`Reject_Request`
-  — and a real token clears JWT signature/issuer validation against this
-  instance fine (confirmed via `bff`'s actual `403 requires role:
-  operator` response — wrong, stale role-name check, not an auth
-  failure; see "Known gaps"). `keycloak/list-permissions-by-role.sh`
-  audits the live Policy→Permission→Resource config from the command
-  line (a filled-in version of the `keycloak-admin` skill's general
-  script).
+  for `operator1` returns a single `RequestApproval` entry with
+  `"scopes": ["Cancel", "Create", "Update"]`, `manager1` the same shape
+  with `"scopes": ["Reject", "Approve"]` — and a real token clears JWT
+  signature/issuer validation against this instance fine (confirmed via
+  `bff`'s actual `403 requires role: operator` response — wrong, stale
+  role-name check, not an auth failure; see "Known gaps").
+  `keycloak/list-permissions-by-role.sh` audits the live
+  Policy→Permission→Resource+Scope config from the command line (a
+  filled-in version of the `keycloak-admin` skill's general script).
   **The 4 core app services are commonly run natively instead**, with
   only `keycloak` in Docker — see "Running locally" below. Note this
   doesn't apply to `temporal-ui`'s own auth (next bullet), which only

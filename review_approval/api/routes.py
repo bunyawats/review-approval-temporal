@@ -49,7 +49,7 @@ class ReviewSearchRequest(BaseModel):
 async def create_review(
     request: Request,
     body: CreateReviewRequest,
-    user: dict = Depends(require_permission("Create_Request")),
+    user: dict = Depends(require_permission("Create")),
 ):
     try:
         request_id = await service.create_review(
@@ -77,7 +77,7 @@ async def update_review(
     request_id: str,
     body: CreateReviewRequest,
     request: Request,
-    user: dict = Depends(require_permission("Update_Request")),
+    user: dict = Depends(require_permission("Update")),
 ):
     try:
         await service.update_review(
@@ -100,7 +100,7 @@ async def update_review(
 async def cancel_review(
     request_id: str,
     request: Request,
-    user: dict = Depends(require_permission("Cancel_Request")),
+    user: dict = Depends(require_permission("Cancel")),
     body: Optional[CancelRequest] = None,
 ):
     comment = body.comment if body else ""
@@ -131,7 +131,7 @@ async def submit_decision(
     # Approve/reject need different permissions -- which one depends on
     # the request body, so this can't be expressed as a single
     # Depends(require_permission(...)); check it explicitly instead.
-    permission = "Approve_Request" if body.decision == "APPROVED" else "Reject_Request"
+    permission = "Approve" if body.decision == "APPROVED" else "Reject"
     await check_permission(user, permission)
     try:
         await service.submit_decision(

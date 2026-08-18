@@ -74,8 +74,8 @@ bounded loop before answering the caller.
   to act on it, since there's no workflow execution left to signal at
   all. See `CLAUDE.md` for the full mechanism.
 - **`api/`** — the JSON REST surface. Validates Keycloak JWTs, enforces
-  fine-grained permissions (`Create_Request`, `Update_Request`,
-  `Cancel_Request`, `Approve_Request`, `Reject_Request`) rather than
+  fine-grained permissions (`Create`, `Update`, `Cancel`, `Approve`,
+  `Reject` — Scopes on a single `RequestApproval` Resource) rather than
   role names, calls into `workflow/service.py`. Temporal itself has no
   concept of roles or permissions — this is the sole enforcement point
   for that front door. See the Keycloak setup section below for how
@@ -203,29 +203,29 @@ docker compose up -d keycloak
 
 This imports a ready-made realm from `keycloak/import/myrealm-realm.json`
 automatically on every start — no manual admin-console setup needed.
-Uses Keycloak's **Authorization Services** (Resources + Policies +
-Permissions) rather than plain/composite roles, so that "which role
-grants which action" is its own editable object instead of being baked
-into a role's membership list:
+Uses Keycloak's **Authorization Services** (a Resource + Scopes +
+Policies + Permissions) rather than plain/composite roles, so that
+"which role grants which action" is its own editable object instead of
+being baked into a role's membership list:
 
 - Three plain (non-composite) realm roles: `Operator`, `Manager`,
   `TemporalAdmin` (the last gates Temporal Web UI login only, via a
-  custom Keycloak authentication flow, not this Resources/Policies/
-  Permissions mechanism — see `CLAUDE.md`'s `temporal-ui` bullet)
-- Five **Resources** on the `review-approval` client, one per action:
-  `Create_Request`, `Update_Request`, `Cancel_Request`,
-  `Approve_Request`, `Reject_Request`
+  custom Keycloak authentication flow, not this Resource/Scopes/
+  Policies/Permissions mechanism — see `CLAUDE.md`'s `temporal-ui`
+  bullet)
+- One **Resource** on the `review-approval` client, `RequestApproval`,
+  carrying five **Scopes** — one per action: `Create`, `Update`,
+  `Cancel`, `Approve`, `Reject`
 - Two role-based **Policies** (`Operator Policy`, `Manager Policy`) and
-  five **Permissions** binding each Resource to the right one —
-  Create/Update/Cancel via `Operator Policy`, Approve/Reject via
-  `Manager Policy`
+  five **scope-type Permissions**, each binding one Scope on
+  `RequestApproval` to the right Policy — Create/Update/Cancel via
+  `Operator Policy`, Approve/Reject via `Manager Policy`
 - `review-approval` is a **confidential** client (`secret:
   dev-secret-change-me`) — required, since a public client can't have
-  Resources/Policies/Permissions at all
+  Authorization Services at all
 - A second confidential client, `temporal-ui` (`secret:
   temporal-ui-dev-secret-change-me`), used only for Temporal Web UI's
-  own OIDC login — unrelated to this Resources/Policies/Permissions
-  setup
+  own OIDC login — unrelated to this Authorization Services setup
 - Five demo users, password `password` for all: `operator1`/`operator2`
   (`Operator`), `manager1`/`manager2` (`Manager`), `temporal-admin1`
   (`TemporalAdmin`)
@@ -233,8 +233,9 @@ into a role's membership list:
 Adding a new role later (e.g. an `Auditor` who can create and cancel but
 not approve/reject) is pure Keycloak config: new `Auditor` role, new
 `Auditor Policy` requiring it, add that policy to the
-`Create_Request`/`Cancel_Request` Permissions' `applyPolicies`. No
-application code changes. To change the realm's own definition, edit
+`Create Permission`/`Cancel Permission` scope-permissions'
+`applyPolicies`. No application code changes. To change the realm's own
+definition, edit
 `keycloak/import/myrealm-realm.json` and recreate the container
 (`docker compose down -v keycloak && docker compose up -d keycloak`) — a
 plain `restart` reuses the running container's state and silently skips
@@ -264,7 +265,7 @@ curl -s -X POST http://localhost:8080/realms/myrealm/protocol/openid-connect/tok
   -d "audience=review-approval" \
   -d "client_id=review-approval" -d "client_secret=dev-secret-change-me" \
   -d "response_mode=permissions"
-# operator1 -> [{"rsname": "Create_Request", ...}, {"rsname": "Update_Request", ...}, {"rsname": "Cancel_Request", ...}]
+# operator1 -> [{"rsname": "RequestApproval", "scopes": ["Create", "Update", "Cancel"], ...}]
 ```
 
 `KEYCLOAK_ISSUER` in `.env.example` (`http://localhost:8080/realms/myrealm`)

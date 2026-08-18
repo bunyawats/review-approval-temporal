@@ -12,7 +12,7 @@
   it, mirroring the route-level require_permission()/check_permission()
   enforcement in bff/ui.py.
 #}
-{% set can_decide = r.status == "PENDING_REVIEW" and ("Approve_Request" in permissions or "Reject_Request" in permissions) %}
+{% set can_decide = r.status == "PENDING_REVIEW" and ("Approve" in permissions or "Reject" in permissions) %}
 <tr id="row-{{ r.id }}">
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.requester }}</td>

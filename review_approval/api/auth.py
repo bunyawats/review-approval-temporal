@@ -3,12 +3,12 @@ Keycloak JWT validation + permission-check dependency for the JSON API.
 
 Temporal has zero concept of roles or permissions -- this is the sole
 enforcement point for this front door. The app checks *permissions*
-(Keycloak Resources: Create_Request, Update_Request, Cancel_Request,
-Approve_Request, Reject_Request), never role names -- see
+(Keycloak Scopes on the single "RequestApproval" Resource: Create,
+Update, Cancel, Approve, Reject), never role names -- see
 workflow/keycloak_auth.py for the actual JWT/UMA mechanics this wraps,
 and CLAUDE.md's api/auth.py bullet + the keycloak-admin skill for the
-general Resources/Policies/Permissions model and why a plain JWT claim
-read isn't enough.
+general Resources/Scopes/Policies/Permissions model and why a plain JWT
+claim read isn't enough.
 
 KEYCLOAK_ISSUER/KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET are all read
 lazily (on first real call), not at import time -- see
@@ -52,8 +52,8 @@ async def check_permission(user: dict, permission: str) -> None:
 
     Callable directly from inside a route body (for routes that need to
     pick the required permission based on the request body -- see
-    submit_decision in routes.py, which needs Approve_Request or
-    Reject_Request depending on the submitted decision, something a
+    submit_decision in routes.py, which needs Approve or
+    Reject depending on the submitted decision, something a
     single Depends() can't express), or via the require_permission()
     dependency factory below for the common single-fixed-permission
     case.
@@ -73,7 +73,7 @@ async def check_permission(user: dict, permission: str) -> None:
 
 
 def require_permission(permission: str):
-    """FastAPI dependency factory: require_permission("Create_Request")"""
+    """FastAPI dependency factory: require_permission("Create")"""
 
     async def checker(user: dict = Depends(get_current_user)) -> dict:
         await check_permission(user, permission)

@@ -80,7 +80,7 @@ def test_operator_can_create(client, tokens):
 def test_manager_cannot_create(client, tokens):
     response = client.post("/reviews", headers=_auth(tokens["manager1"]), json=_purchase_order_payload())
     assert response.status_code == 403
-    assert "Create_Request" in response.json()["detail"]
+    assert "Create" in response.json()["detail"]
 
 
 # ------------------------------------------------------------- update/cancel ----
@@ -91,7 +91,7 @@ def test_manager_cannot_update(client, tokens):
         f"/reviews/{request_id}", headers=_auth(tokens["manager1"]), json=_purchase_order_payload("changed")
     )
     assert response.status_code == 403
-    assert "Update_Request" in response.json()["detail"]
+    assert "Update" in response.json()["detail"]
 
 
 def test_operator_can_cancel_own_pending_request(client, tokens):
@@ -108,7 +108,7 @@ def test_manager_cannot_cancel(client, tokens):
         f"/reviews/{request_id}/cancel", headers=_auth(tokens["manager1"]), json={"comment": "not my job"}
     )
     assert response.status_code == 403
-    assert "Cancel_Request" in response.json()["detail"]
+    assert "Cancel" in response.json()["detail"]
 
 
 # ------------------------------------------------------------------ decision ----
@@ -120,13 +120,13 @@ def test_operator_cannot_approve_or_reject(client, tokens):
         f"/reviews/{request_id}/decision", headers=_auth(tokens["operator1"]), json={"decision": "APPROVED"}
     )
     assert approve.status_code == 403
-    assert "Approve_Request" in approve.json()["detail"]
+    assert "Approve" in approve.json()["detail"]
 
     reject = client.post(
         f"/reviews/{request_id}/decision", headers=_auth(tokens["operator1"]), json={"decision": "REJECTED"}
     )
     assert reject.status_code == 403
-    assert "Reject_Request" in reject.json()["detail"]
+    assert "Reject" in reject.json()["detail"]
 
 
 def test_manager_can_approve(client, tokens):
