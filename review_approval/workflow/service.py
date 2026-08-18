@@ -235,7 +235,6 @@ async def _reconcile_missing_workflow(pool: asyncpg.Pool, request_id: str) -> No
             """
             UPDATE review_requests
             SET status = 'CANCELLED',
-                closed_status = 'CANCELLED',
                 closed_by = 'temporal-admin',
                 closed_comment = 'workflow transaction not found',
                 closed_at = NULL,

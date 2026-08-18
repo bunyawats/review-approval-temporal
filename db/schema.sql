@@ -13,13 +13,16 @@ CREATE TABLE IF NOT EXISTS review_requests (
     review_type       TEXT NOT NULL,               -- discriminator: "purchase_order", "leave_request", ...
     payload           JSONB NOT NULL,              -- type-specific payload, already validated by BFF
     requester         TEXT NOT NULL,               -- Keycloak username of the Operator
-    -- PENDING_REVIEW | APPROVED | REJECTED | CANCELLED
+    -- PENDING_REVIEW | APPROVED | REJECTED | CANCELLED. Doubles as the
+    -- "closed status" once terminal -- there's no separate closed_status
+    -- column; it would only ever duplicate this value (NULL/PENDING_REVIEW
+    -- pre-close, identical to `status` post-close), so it was removed
+    -- rather than kept as redundant state that could theoretically drift.
     status            TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
-    -- All three terminal outcomes are "closed" in the same sense: someone
+        -- All three terminal outcomes are "closed" in the same sense: someone
     -- (a Manager approving/rejecting, or the requester cancelling their
-    -- own request) made it final. These three columns are shared across
+    -- own request) made it final. These two columns are shared across
     -- all of them rather than being decision-specific:
-    closed_status     TEXT,                        -- APPROVED | REJECTED | CANCELLED
     closed_by         TEXT,                        -- Manager username (approve/reject), or the
                                                      -- requester's own username (cancel)
     closed_comment    TEXT,                        -- optional note from whoever closed it

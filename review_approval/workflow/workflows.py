@@ -46,7 +46,6 @@ class ReviewRequestInput:
 class ReviewStatus:
     status: str
     closed_by: Optional[str] = None
-    closed_status: Optional[str] = None  # APPROVED | REJECTED | CANCELLED
     closed_comment: Optional[str] = None
 
 
@@ -57,7 +56,6 @@ class ReviewApprovalWorkflow:
         self._payload: dict[str, Any] = {}
         self._status = "PENDING_REVIEW"
         self._closed_by: Optional[str] = None
-        self._closed_status: Optional[str] = None
         self._closed_comment: Optional[str] = None
         self._decision_received = False
         self._cancelled = False
@@ -136,13 +134,11 @@ class ReviewApprovalWorkflow:
                 self._cancelled = True
                 self._status = "CANCELLED"
                 self._closed_by = "temporal-admin"
-                self._closed_status = "CANCELLED"
                 self._closed_comment = "forced by temporal system"
 
         return ReviewStatus(
             status=self._status,
             closed_by=self._closed_by,
-            closed_status=self._closed_status,
             closed_comment=self._closed_comment,
         )
 
@@ -159,14 +155,13 @@ class ReviewApprovalWorkflow:
             persist_decision,
             PersistDecisionInput(
                 request_id=self._request_id,
-                closed_status=decision,
+                decision=decision,
                 closed_by=manager_id,
                 closed_comment=comment,
             ),
             start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
         )
-        self._closed_status = decision
         self._closed_by = manager_id
         self._closed_comment = comment
         self._status = decision
@@ -201,7 +196,6 @@ class ReviewApprovalWorkflow:
         self._cancelled = True
         self._status = "CANCELLED"
         self._closed_by = cancelled_by
-        self._closed_status = "CANCELLED"
         self._closed_comment = comment
 
     @workflow.query
@@ -209,6 +203,5 @@ class ReviewApprovalWorkflow:
         return ReviewStatus(
             status=self._status,
             closed_by=self._closed_by,
-            closed_status=self._closed_status,
             closed_comment=self._closed_comment,
         )

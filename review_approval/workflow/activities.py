@@ -37,7 +37,7 @@ class PersistRequestInput:
 @dataclass
 class PersistDecisionInput:
     request_id: str
-    closed_status: str  # APPROVED | REJECTED
+    decision: str  # APPROVED | REJECTED
     closed_by: str
     closed_comment: str
 
@@ -69,14 +69,13 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
             """
             UPDATE review_requests
             SET status = $2,
-                closed_status = $2,
                 closed_by = $3,
                 closed_comment = $4,
                 closed_at = now()
             WHERE id = $1
             """,
             inp.request_id,
-            inp.closed_status,
+            inp.decision,
             inp.closed_by,
             inp.closed_comment,
         )
@@ -124,7 +123,6 @@ async def persist_cancel(inp: PersistCancelInput) -> None:
             """
             UPDATE review_requests
             SET status = 'CANCELLED',
-                closed_status = 'CANCELLED',
                 closed_by = $2,
                 closed_comment = $3,
                 closed_at = COALESCE($4, now())

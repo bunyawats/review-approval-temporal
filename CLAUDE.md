@@ -479,24 +479,38 @@ or `bff/` respectively; don't put front-door-specific logic in
 - **`review_type` is immutable after creation.** Only `payload` can be
   edited. The edit form disables the review-type `<input>` for this
   reason.
-- **`closed_status`/`closed_by`/`closed_comment`/`closed_at` are shared
-  across all three terminal outcomes** (`APPROVED`, `REJECTED`,
-  `CANCELLED`) — not decision-specific. A cancellation populates all
-  four the same as a decision does, just with the requester as the actor
-  and `CANCELLED` as the status. `cancel_request`'s signal signature is
-  `(self, cancelled_by: str, comment: str = "")`. A fourth terminal
-  outcome, if ever added, should reuse these same four columns — already
-  validated by two more `CANCELLED`-reaching paths added since this was
-  written: a native Temporal cancel (`workflows.py`'s `except
-  asyncio.CancelledError`, `closed_by="temporal-admin"`,
-  `closed_comment="forced by temporal system"`, real `closed_at`) and a
-  deleted-workflow recovery (`service.py`'s
-  `_reconcile_missing_workflow()`, same `closed_by`, `closed_comment=
-  "workflow transaction not found"`, but **`closed_at` stays `NULL`** —
-  the one legitimate case where a terminal row doesn't have a real close
-  timestamp, since nothing in Temporal recorded when the workflow actually
-  disappeared. A reader relying on "`closed_at` is always set once
-  terminal" needs to special-case this.
+- **`closed_by`/`closed_comment`/`closed_at` are shared across all three
+  terminal outcomes** (`APPROVED`, `REJECTED`, `CANCELLED`) — not
+  decision-specific. A cancellation populates all three the same as a
+  decision does, just with the requester as the actor and `CANCELLED` as
+  the status. `cancel_request`'s signal signature is `(self, cancelled_by:
+  str, comment: str = "")`. A fourth terminal outcome, if ever added,
+  should reuse these same three columns — already validated by two more
+  `CANCELLED`-reaching paths added since this was written: a native
+  Temporal cancel (`workflows.py`'s `except asyncio.CancelledError`,
+  `closed_by="temporal-admin"`, `closed_comment="forced by temporal
+  system"`, real `closed_at`) and a deleted-workflow recovery
+  (`service.py`'s `_reconcile_missing_workflow()`, same `closed_by`,
+  `closed_comment="workflow transaction not found"`, but **`closed_at`
+  stays `NULL`** — the one legitimate case where a terminal row doesn't
+  have a real close timestamp, since nothing in Temporal recorded when
+  the workflow actually disappeared. A reader relying on "`closed_at` is
+  always set once terminal" needs to special-case this.
+  **There is deliberately no `closed_status` column** — it was removed
+  (previously present, duplicating `status` once terminal and `NULL`
+  before) after auditing every write site and confirming `status` and
+  `closed_status` were *always* set to the identical value together, in
+  every code path, with no exception; `status` alone already tells you
+  "closed status" once it's not `PENDING_REVIEW`. Removed end to end:
+  the DB column, `activities.py`'s `PersistDecisionInput.closed_status`
+  field (renamed to `decision` — that's what it actually was, since it
+  fed both `status` and the now-gone `closed_status` from the same
+  value), and `workflows.py`'s `ReviewStatus` dataclass field +
+  `self._closed_status` instance state. Removing this changed the JSON
+  API's response shape (`closed_status` no longer appears in `GET
+  /reviews/{id}` or `POST /reviews/search` results) — acceptable for
+  this POC, but a real breaking change for any external consumer, not
+  purely an internal cleanup.
 - Workflow ↔ activity data crosses via `@dataclass`, not raw dicts/tuples
   (see `PersistRequestInput`, `ReviewStatus`, etc.) — keep this pattern
   for any new activities.
