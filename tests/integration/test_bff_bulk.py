@@ -1,8 +1,13 @@
 """
 Integration tests for bff/ui.py's bulk cancel/approve/reject selection UI
-and confirm/execute flow (docs/BULK_ACTIONS_PLAN.md), against a REAL
-local Keycloak instance (docker compose up -d keycloak) and the real app
-(native Postgres/Temporal/worker, per README's local dev setup).
+and confirm/execute flow (docs/BULK_ACTIONS_PLAN.md). Operator's routes
+are named bulk-decision-form/bulk-decision, not bulk-cancel-*, since
+cancelling was merged into decision (see
+docs/MERGE_CANCEL_DECISION_PLAN.md) -- decision is hardcoded CANCELLED
+server-side on the operator side, so it's never sent in these requests.
+Against a REAL local Keycloak instance (docker compose up -d keycloak)
+and the real app (native Postgres/Temporal/worker, per README's local
+dev setup).
 
 Marked `integration` (see pyproject.toml's markers) since it needs the
 local stack up; deselect with `pytest -m "not integration"` when it
@@ -126,7 +131,7 @@ def test_bulk_select_only_mutates_own_selection():
         op1.get("/ui/operator")  # fresh load: clear any state left by other tests
         id1 = _create_as(op1, vendor="op1-item")
         _select(op1, "operator", [id1])
-        dialog = op1.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog = op1.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(dialog.text) == 1
 
     with _client_as("operator2") as op2:
@@ -134,18 +139,18 @@ def test_bulk_select_only_mutates_own_selection():
         # somehow leaked across the shared _bulk_selection dict, this would
         # show a nonzero count.
         op2.get("/ui/operator")
-        leaked = op2.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        leaked = op2.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(leaked.text) == 0
 
         id2 = _create_as(op2, vendor="op2-item")
         _select(op2, "operator", [id2])
-        dialog2 = op2.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog2 = op2.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         # operator2's selection is its own, and operator1's earlier
         # selection wasn't cleared by operator2's actions.
         assert _confirm_dialog_count(dialog2.text) == 1
 
     with _client_as("operator1") as op1_again:
-        dialog_again = op1_again.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog_again = op1_again.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(dialog_again.text) == 1
 
 
@@ -155,7 +160,7 @@ def test_unchecking_removes_from_selection():
         request_id = _create_as(client)
         _select(client, "operator", [request_id], checked=True)
         _select(client, "operator", [request_id], checked=False)
-        dialog = client.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog = client.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert "Nothing selected" in dialog.text
 
 
@@ -164,13 +169,13 @@ def test_fresh_page_load_clears_selection_without_confirming():
         client.get("/ui/operator")
         request_id = _create_as(client)
         _select(client, "operator", [request_id])
-        dialog = client.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog = client.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(dialog.text) == 1
 
         # A plain GET (not the poll route) clears selection even without
         # ever confirming a bulk action.
         client.get("/ui/operator")
-        dialog2 = client.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog2 = client.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert "Nothing selected" in dialog2.text
 
 
@@ -190,7 +195,7 @@ def test_bulk_cancel_form_drops_ids_not_owned_by_this_operator():
         op2.get("/ui/operator")
         own_id = _create_as(op2, vendor="yours", review_type="leave_request")
         _select(op2, "operator", [foreign_id, own_id])
-        dialog = op2.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog = op2.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         # foreign_id was dropped -- only own_id (a leave_request) survives.
         assert _confirm_dialog_count(dialog.text) == 1
         assert "leave_request" in dialog.text
@@ -306,12 +311,12 @@ def test_bulk_cancel_flow_end_to_end():
         ids = [_create_as(client, vendor=f"bulk-{i}") for i in range(3)]
         _select(client, "operator", ids)
 
-        dialog = client.post("/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""})
+        dialog = client.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert dialog.status_code == 200
         assert _confirm_dialog_count(dialog.text) == 3
 
         result = client.post(
-            "/ui/operator/bulk-cancel", data={"comment": "batch cleanup", "page": 0, "query_id": ""}
+            "/ui/operator/bulk-decision", data={"comment": "batch cleanup", "page": 0, "query_id": ""}
         )
         assert result.status_code == 200, result.text
         assert "3 succeeded, 0 failed" in result.text
@@ -333,7 +338,7 @@ def test_manager_cannot_bulk_cancel():
     # via Depends), so this 403s regardless of whether any request exists.
     with _client_as("manager1") as manager:
         response = manager.post(
-            "/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""}
+            "/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""}
         )
         assert response.status_code == 403
         assert "Cancel" in response.json()["detail"]
@@ -386,7 +391,7 @@ def test_bulk_decision_mixed_eligible_and_terminal_shows_per_item_results():
         eligible = _create_as(client, vendor="eligible")
         already_terminal = _create_as(client, vendor="already-terminal")
         cancel_resp = client.post(
-            f"/ui/operator/{already_terminal}/cancel", data={"comment": "beat you to it"}
+            f"/ui/operator/{already_terminal}/decision", data={"comment": "beat you to it"}
         )
         assert cancel_resp.status_code == 200
 

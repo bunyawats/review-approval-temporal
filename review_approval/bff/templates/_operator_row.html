@@ -66,8 +66,16 @@
     </button>
     {% endif %}
     {% if can_cancel %}
+    {#
+      Opens _detail_dialog.html (via /detail), not a dedicated dialog --
+      Cancel was merged into the same View/Review/Approve/Reject dialog
+      manager decisions already use (see
+      docs/MERGE_CANCEL_DECISION_PLAN.md); this button's own id/spinner
+      are what _detail_dialog.html's Confirm Cancel button references as
+      its htmx.ajax() `source`.
+    #}
     <button id="cancel-btn-{{ r.id }}" class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
-      hx-get="/ui/operator/{{ r.id }}/cancel-form" hx-target="#dialog-container" hx-swap="innerHTML" hx-indicator="#cancel-spinner-{{ r.id }}">
+      hx-get="/ui/operator/{{ r.id }}/detail" hx-target="#dialog-container" hx-swap="innerHTML" hx-indicator="#cancel-spinner-{{ r.id }}">
       <span id="cancel-spinner-{{ r.id }}" class="htmx-indicator transition-opacity duration-200 [&.htmx-request]:!duration-0 w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin [animation-duration:.3s]"></span>
       Cancel
     </button>

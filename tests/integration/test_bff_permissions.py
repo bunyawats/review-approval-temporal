@@ -143,9 +143,13 @@ def test_manager_cannot_update():
 
 
 def test_operator_can_cancel_own_pending_request():
+    # Cancelling is just another decision now -- .../cancel-form and
+    # .../cancel were removed, folded into .../detail + .../decision (see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md). decision is hardcoded
+    # CANCELLED server-side on this route, so it's not sent here.
     with _client_as("operator2") as client:
         request_id = _create_as(client, vendor="cancel-me")
-        response = client.post(f"/ui/operator/{request_id}/cancel", data={"comment": "changed my mind"})
+        response = client.post(f"/ui/operator/{request_id}/decision", data={"comment": "changed my mind"})
         assert response.status_code == 200
         assert "CANCELLED" in response.text
 
@@ -154,25 +158,43 @@ def test_manager_cannot_cancel():
     with _client_as("operator1") as client:
         request_id = _create_as(client)
     with _client_as("manager1") as manager:
-        response = manager.post(f"/ui/operator/{request_id}/cancel", data={"comment": "not my job"})
+        response = manager.post(f"/ui/operator/{request_id}/decision", data={"comment": "not my job"})
         assert response.status_code == 403
         assert "Cancel" in response.json()["detail"]
+
+
+def test_operator_cannot_cancel_someone_elses_request():
+    with _client_as("operator1") as client:
+        request_id = _create_as(client)
+    with _client_as("operator2") as other:
+        response = other.post(f"/ui/operator/{request_id}/decision", data={"comment": "not yours"})
+        # require_permission("Cancel") passes (operator2 holds Cancel) --
+        # this is the service-layer ownership check, and the route
+        # swallows the resulting PermissionError (POC behavior, unchanged
+        # by the merge) rather than surfacing it, just re-rendering the
+        # row's still-PENDING_REVIEW state.
+        assert response.status_code == 200
+        assert "PENDING REVIEW" in response.text  # status badge text (underscore -> space)
+        assert "CANCELLED" not in response.text
 
 
 # ------------------------------------------------------------------ decision ----
 
 def test_operator_cannot_reach_manager_decision():
-    # manager_decision is gated by require_session_role("manager") first
-    # -- an operator session never even reaches the Approve/
-    # Reject permission check, unlike the REST API (which has
-    # no equivalent role gate on this route, only the permission check).
+    # manager_decision no longer has a require_session_role("manager")
+    # pre-gate (see docs/MERGE_CANCEL_DECISION_PLAN.md's permission-
+    # architecture decision) -- an operator session now gets blocked by
+    # the real permission check instead, same as the REST API. The
+    # failure message changed accordingly: it used to be "requires role:
+    # manager" (the now-removed role gate); it's "requires permission:
+    # Approve" now.
     with _client_as("operator1") as client:
         request_id = _create_as(client)
         response = client.post(
             f"/ui/manager/{request_id}/decision", data={"decision": "APPROVED", "comment": "self-approve"}
         )
         assert response.status_code == 403
-        assert "requires role: manager" in response.json()["detail"]
+        assert "requires permission: Approve" in response.json()["detail"]
 
 
 def test_manager_can_approve():

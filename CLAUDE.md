@@ -75,58 +75,83 @@ or `bff/` respectively; don't put front-door-specific logic in
   **payload-agnostic**: it only ever sees `review_type: str` and
   `payload: dict[str, Any]`, and never inspects the dict's contents. All
   payload-shape validation belongs in `workflow/schemas.py`. Terminal
-  states are `APPROVED`, `REJECTED`, `CANCELLED`, reached via the
-  `submit_decision` and `cancel_request` signals; `_claim_final()` guards
-  every terminal-transition path against acting twice. `update_payload` is
-  only valid pre-decision.
+  states are `APPROVED`, `REJECTED`, `CANCELLED`
+  (`VALID_DECISIONS = ("APPROVED", "REJECTED", "CANCELLED")`), all three
+  reached via the single `submit_decision` signal — **cancelling is just
+  another decision, not a separate signal** (see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`; this used to be a
+  `submit_decision` signal for Approve/Reject plus a separate
+  `cancel_request` signal for Cancel, folded together since they wrote
+  the same shape of update and needed the same terminal-transition
+  guard). `_claim_final()` guards every terminal-transition path against
+  acting twice. `update_payload` is only valid pre-decision.
   **A native Temporal cancel (the Web UI's or CLI's Cancel button/command
-  — `CancelWorkflowExecution`, distinct from our own `cancel_request`
+  — `CancelWorkflowExecution`, distinct from our own `submit_decision`
   signal) is caught, not left to orphan the Postgres row.** It's delivered
   as `asyncio.CancelledError` at `run()`'s `await
   workflow.wait_condition(self._is_final)` (confirmed by reading the SDK's
   own `wait_condition` implementation, not assumed); an uncaught
   `except`-less version of this leaves the workflow `Canceled` in Temporal
   while Postgres stays stuck at `PENDING_REVIEW` forever, since
-  `persist_cancel` — the only thing that writes `status='CANCELLED'` —
-  lives inside the `cancel_request` signal handler, which a native cancel
+  `persist_decision` — the only thing that writes a terminal `status` —
+  lives inside the `submit_decision` signal handler, which a native cancel
   never invokes. The `except asyncio.CancelledError` block runs the same
-  `persist_cancel` activity itself, attributed to `closed_by=
-  "temporal-admin"`, `closed_comment="forced by temporal system"`,
-  `closed_at=workflow.now()` (the deterministic, replay-safe clock,
-  captured at the moment the cancellation was observed — not real
-  wall-clock time, which the workflow sandbox disallows), and does **not**
-  re-raise — `run()` falls through to its normal `return`, so the
-  execution ends `Completed` in Temporal, converging on the exact same
-  outcome `cancel_request` produces rather than a differently-shaped
-  `Canceled` status. Verified end to end against a real local Temporal
-  server (`temporal workflow cancel`, and separately via the Web UI's
-  Cancel button): Postgres lands `CANCELLED`/`temporal-admin`/`forced by
-  temporal system` with a real timestamp, and a subsequent decision
-  attempt on that request cleanly hits the normal "already been decided"
-  `ValueError` instead of an unhandled 500.
+  `persist_decision` activity itself (with `decision="CANCELLED"`),
+  attributed to `closed_by="temporal-admin"`, `closed_comment="forced by
+  temporal system"`, `closed_at=workflow.now()` (the deterministic,
+  replay-safe clock, captured at the moment the cancellation was observed
+  — not real wall-clock time, which the workflow sandbox disallows), and
+  does **not** re-raise — `run()` falls through to its normal `return`, so
+  the execution ends `Completed` in Temporal, converging on the exact same
+  outcome a real `submit_decision(..., "CANCELLED", ...)` signal produces
+  rather than a differently-shaped `Canceled` status. Verified end to end
+  against a real local Temporal server (`temporal workflow cancel`, and
+  separately via the Web UI's Cancel button): Postgres lands
+  `CANCELLED`/`temporal-admin`/`forced by temporal system` with a real
+  timestamp, and a subsequent decision attempt on that request cleanly
+  hits the normal "already been decided" `ValueError` instead of an
+  unhandled 500.
   **`_claim_final()`** (replacing a bare `_is_final()` check in
-  `submit_decision`, `cancel_request`, and this `except` block) closes a
-  narrower check-then-act race those three terminal-transition paths would
-  otherwise share: each does `if self._is_final(): return` and only
-  *later*, after an `await workflow.execute_activity(persist_*)`, sets
-  `_decision_received`/`_cancelled` — since signal handlers and `run()`'s
-  `except` block interleave at await points rather than executing
-  atomically, two paths (e.g. a real `submit_decision` signal landing in
-  the same window as a native cancel) could both observe `_is_final() ==
-  False` before either has actually persisted anything, and both schedule
-  conflicting `persist_*` activities. `_claim_final()` sets a `_closing`
-  flag **synchronously, with no `await` in between the check and the
-  set**, so only the first caller ever proceeds; `submit_decision`
-  explicitly resets `_closing = False` on its invalid-decision path so a
-  bad decision value doesn't permanently lock out a legitimate later
-  signal. `update_payload` is untouched — it never transitions to a
-  terminal state, so there's nothing to race over there.
+  `submit_decision` and this `except` block) closes a narrower
+  check-then-act race those two terminal-transition paths would otherwise
+  share: each does `if self._is_final(): return` and only *later*, after
+  an `await workflow.execute_activity(persist_decision)`, sets
+  `self._finalized = True` — since signal handlers and `run()`'s `except`
+  block interleave at await points rather than executing atomically, two
+  paths (e.g. a real `submit_decision` signal landing in the same window
+  as a native cancel) could both observe `_is_final() == False` before
+  either has actually persisted anything, and both schedule conflicting
+  `persist_decision` activities. `_claim_final()` sets a `_closing` flag
+  **synchronously, with no `await` in between the check and the set**, so
+  only the first caller ever proceeds; `submit_decision` explicitly resets
+  `_closing = False` on its invalid-decision path so a bad decision value
+  doesn't permanently lock out a legitimate later signal. `update_payload`
+  is untouched — it never transitions to a terminal state, so there's
+  nothing to race over there. `_finalized` is a single flag, not the
+  separate `_decision_received`/`_cancelled` pair this used to be — with
+  cancel folded into decision there's only one signal handler reaching a
+  terminal state (plus the native-cancel `except` block above), and
+  neither ever needed to be distinguished from the other by
+  `_is_final()`'s caller; `self._status` is what says *which* terminal
+  outcome it was, when that matters.
 - **`workflow/activities.py`** — the *only* file allowed to talk to
   Postgres. Workflow code never calls asyncpg directly; it goes through
   `workflow.execute_activity`. One activity per state-changing operation
-  (`persist_request`, `persist_decision`, `persist_update`,
-  `persist_cancel`) — don't collapse these into a single generic
-  activity, since each has different column-update semantics.
+  (`persist_request`, `persist_decision`, `persist_update`) — don't
+  collapse these into a single generic activity, since each has different
+  column-update semantics. `persist_decision` itself handles all three
+  terminal outcomes (APPROVED/REJECTED/CANCELLED) in one activity, not
+  one-activity-per-outcome — unlike the other three, these all write the
+  exact same columns (`status`, `closed_by`, `closed_comment`,
+  `closed_at`) with the same shape, the only per-outcome difference being
+  the `decision` value itself, so a `persist_decision`/`persist_cancel`
+  split here was pure duplication rather than a real semantic boundary
+  (see `docs/MERGE_CANCEL_DECISION_PLAN.md` for the audit that confirmed
+  this before merging them). `PersistDecisionInput.closed_at` stays
+  `Optional[datetime] = None` for the same reason it did on the old,
+  now-removed `PersistCancelInput` — only ever set by the native-cancel
+  `except` block above, everywhere else it's `None` and the activity's
+  own `COALESCE($5, now())` fills in the real commit time.
 - **`workflow/worker.py`** — long-running process that executes
   workflow/activity code, separate from the app. Any new activity must be
   registered in both `workflows.py`'s `imports_passed_through` block and
@@ -155,11 +180,27 @@ or `bff/` respectively; don't put front-door-specific logic in
   module rather than duplicating business logic (ownership checks,
   status checks, payload validation). Add new capabilities here first,
   then expose from both routers.
-  **`create_review`/`update_review`/`cancel_review`/`submit_decision`
+  **`create_review`/`update_review`/`submit_decision`
   all wait for their write to actually land in Postgres before
   returning** (`_wait_until()`, a bounded poll: 50ms interval, 5s
   timeout, always returns whatever it last read even on timeout rather
-  than raising). This exists because `client.start_workflow()` and
+  than raising). `submit_decision()` is also what cancelling now goes
+  through — a `cancel_review()` used to exist as its own function with
+  the same `_wait_until()` treatment; it was merged into
+  `submit_decision(client, pool, request_id, decision, actor, comment)`
+  (`decision` ∈ `VALID_DECISIONS = ("APPROVED", "REJECTED",
+  "CANCELLED")`) since both did the same status-check +
+  `handle.signal()` + `_wait_until()` shape, differing only in which
+  ownership check ran and what string got signalled — see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`. `submit_decision()` checks
+  `record["status"] != "PENDING_REVIEW"` first (the same "already
+  decided" `ValueError` regardless of `decision`), then, only for
+  `decision == "CANCELLED"`, an ownership check (`record["requester"] !=
+  actor` → `PermissionError`) that `APPROVED`/`REJECTED` never run —
+  this conditional-by-decision-type branch is exactly what preserves
+  `cancel_review()`'s original error precedence (status check before
+  ownership check) now that both live in one function. This exists
+  because `client.start_workflow()` and
   `handle.signal()` only confirm Temporal *accepted* the start/signal —
   not that the workflow has run its handler or that the resulting
   `persist_*` activity (which runs asynchronously, whenever a worker
@@ -183,7 +224,7 @@ or `bff/` respectively; don't put front-door-specific logic in
   `PENDING_REVIEW` — a strictly harder case than the native-cancel handling
   in `workflows.py`, since there's no workflow execution left at all for
   any code to run inside; the recovery has to live here instead.
-  `update_review`/`cancel_review`/`submit_decision` all route their
+  `update_review`/`submit_decision` all route their
   `handle.signal(...)` call through `_signal_or_reconcile()`, which catches
   `temporalio.service.RPCError` specifically when `.status ==
   RPCStatusCode.NOT_FOUND` (confirmed by reproducing this directly against
@@ -198,7 +239,7 @@ or `bff/` respectively; don't put front-door-specific logic in
   "`activities.py` is the only file allowed to talk to Postgres" (see that
   bullet above): that rule is about durable writes going through Temporal,
   which is meaningless once Temporal's own record of the execution no
-  longer exists to run a `persist_cancel` activity through.
+  longer exists to run a `persist_decision` activity through.
   `closed_at` stays `NULL` (not `now()`) since there's no Temporal-side
   event to anchor a real timestamp to — unlike `workflows.py`'s
   `workflow.now()` for a native cancel, we only find out the workflow is
@@ -218,19 +259,24 @@ or `bff/` respectively; don't put front-door-specific logic in
   in `task_queues.py`. An `assert` at the bottom of this file checks the
   two stay in sync and fails loudly at import time if not — don't remove
   it.
-  **Bulk cancel/approve/reject** (`bulk_cancel_reviews()`,
-  `bulk_submit_decision()`, `get_reviews()`, `_validate_bulk_ids()`, see
-  `docs/BULK_ACTIONS_PLAN.md`) live in this file too, at the bottom.
-  They're thin orchestration over the single-item functions above, not a
-  new code path: `bulk_cancel_reviews()`/`bulk_submit_decision()` fan out
-  `asyncio.gather()` over `cancel_review()`/`submit_decision()` (one
-  Temporal signal + `_wait_until()` confirmation each), catching exactly
-  the exception types those functions are documented to raise
-  (`LookupError`/`PermissionError`/`ValueError`) into a per-item
-  `BulkActionResult(request_id, ok, error)` — anything else is a genuine
-  bug and is left to propagate, not swallowed into a misleading "failed"
-  result. This means a bulk action inherits deleted-workflow recovery,
-  the already-decided guard, etc. for free, with zero duplicated
+  **Bulk decision** (`bulk_submit_decision()`, `get_reviews()`,
+  `_validate_bulk_ids()`, see `docs/BULK_ACTIONS_PLAN.md`) lives in this
+  file too, at the bottom. It's thin orchestration over `submit_decision()`
+  above, not a new code path: `bulk_submit_decision(client, pool,
+  request_ids, decision, actor, comment)` fans out `asyncio.gather()`
+  over `submit_decision()` (one Temporal signal + `_wait_until()`
+  confirmation each), catching exactly the exception types that function
+  is documented to raise (`LookupError`/`PermissionError`/`ValueError`)
+  into a per-item `BulkActionResult(request_id, ok, error)` — anything
+  else is a genuine bug and is left to propagate, not swallowed into a
+  misleading "failed" result. A `bulk_cancel_reviews()` used to exist as
+  `bulk_submit_decision()`'s sibling, fanning out over the old
+  `cancel_review()` the same way; it's gone now that cancelling is just
+  `bulk_submit_decision(..., decision="CANCELLED", ...)` (see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`) — one bulk entry point for all
+  three decision values, not one per outcome. This means a bulk action
+  inherits deleted-workflow recovery, the already-decided guard, the
+  CANCELLED-only ownership check, etc. for free, with zero duplicated
   ownership/status logic to drift out of sync. `_validate_bulk_ids()`
   de-dupes (preserving order) and caps at `_MAX_BULK_SIZE = 50`, raising
   `ValueError` for empty or over-cap input *before* any Temporal/Postgres
@@ -243,24 +289,42 @@ or `bff/` respectively; don't put front-door-specific logic in
   each route extracts params, calls `workflow/service.py`, maps
   exceptions to HTTP status codes. Each route depends on
   `require_permission(...)` (see `api/auth.py` below), never a role
-  check. `POST /reviews/{id}/decision` is the one route needing **two**
-  different permissions depending on the request body — `APPROVED` needs
-  `Approve`, `REJECTED` needs `Reject` — which a single
-  dependency can't express, so that route checks the permission matching
-  the submitted `decision` value inside the handler itself rather than
-  via the dependency list.
-  **`POST /reviews/bulk/cancel`/`POST /reviews/bulk/decision`** (bodies:
-  `{"request_ids": [...], "comment": ""}` /
-  `{"request_ids": [...], "decision": "APPROVED"|"REJECTED", "comment":
-  ""}`) reuse the exact same `require_permission("Cancel")`/inline
-  `check_permission("Approve"/"Reject")` gates as their single-item
-  counterparts — no new permission introduced, a bulk call is authorized
-  exactly like N individual calls would be. Response shape: `{"results":
-  [{"request_id", "ok", "error"}, ...], "succeeded": int, "failed":
-  int}`. **Both are registered before the `/reviews/{request_id}/...`
+  check. **`POST /reviews/{id}/decision`** (body: `{"decision":
+  "APPROVED"|"REJECTED"|"CANCELLED", "comment": ""}`) is the one route
+  needing a *different* permission per request-body value — `APPROVED`
+  needs `Approve`, `REJECTED` needs `Reject`, `CANCELLED` needs `Cancel`
+  — which a single `Depends(require_permission(...))` can't express, so
+  the route looks the right permission up from a module-level
+  `_DECISION_PERMISSIONS = {"APPROVED": "Approve", "REJECTED": "Reject",
+  "CANCELLED": "Cancel"}` dict and calls `check_permission()` inline.
+  `POST /reviews/{id}/cancel` used to be this route's separate sibling
+  (its own `require_permission("Cancel")` dependency, no body beyond a
+  comment); it's **removed entirely** — cancelling is just
+  `POST .../decision` with `decision="CANCELLED"` now (see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`; a deliberate breaking REST API
+  change, accepted at this POC stage). One consequence easy to miss when
+  merging: unlike `APPROVED`/`REJECTED`, a `CANCELLED` decision can still
+  fail *after* the permission check passes, on ownership —
+  `service.submit_decision()` raises `PermissionError` when the caller
+  isn't the request's own requester — so this route has a
+  `except PermissionError as e: raise HTTPException(403, ...)` handler
+  that Approve/Reject never needed before.
+  **`POST /reviews/bulk/decision`** (body: `{"request_ids": [...],
+  "decision": "APPROVED"|"REJECTED"|"CANCELLED", "comment": ""}`) reuses
+  the same `_DECISION_PERMISSIONS` lookup + inline `check_permission()`
+  as the single-item route — no new permission introduced, a bulk call
+  is authorized exactly like N individual calls would be; an
+  unrecognized `decision` value has no dict entry, so the permission
+  check is skipped entirely and the request falls through to
+  `service.bulk_submit_decision()`'s own `ValueError` validation instead
+  (a 400, not a 403). `POST /reviews/bulk/cancel` — the bulk route's own
+  former separate-endpoint sibling — is removed the same way as the
+  single-item case, folded into this one route. Response shape:
+  `{"results": [{"request_id", "ok", "error"}, ...], "succeeded": int,
+  "failed": int}`. **Registered before the `/reviews/{request_id}/...`
   routes**, not after — FastAPI matches path routes in registration
-  order, and `/reviews/bulk/cancel` has the same 3-segment shape as
-  `/reviews/{request_id}/cancel`; registering the parameterized route
+  order, and `/reviews/bulk/decision` has the same 3-segment shape as
+  `/reviews/{request_id}/decision`; registering the parameterized route
   first would silently swallow the bulk route with `request_id="bulk"`.
 - **`api/auth.py`** — Keycloak JWT validation + **permission-check**
   dependency (`require_permission(permission: str)`) for the JSON API —
@@ -336,26 +400,54 @@ or `bff/` respectively; don't put front-door-specific logic in
 - **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
   `/ui/operator`, `/ui/manager`). Every route calls `workflow/service.py`,
   never Temporal/Postgres directly.
-  **Permission enforcement (Phase 3)**: `new_form`/`create_request`,
-  `edit_form`/`update_request`, and `cancel_form`/`cancel_request_route`
-  are gated by `Depends(require_permission("Create"))` etc.;
-  `manager_decision` branches `Approve`/`Reject` via an
-  inline `check_permission()` call based on the submitted `decision`
-  (can't be a single `Depends()` since the required permission depends
-  on request body, same reasoning as `api/routes.py`'s `submit_decision`)
-  — note `manager_decision` is *also* still gated by
-  `require_session_role("manager")` first, so an operator session gets
-  `403 requires role: manager` before the permission check ever runs
-  (unlike the REST API, which has no role gate on that route, only the
-  permission check — a real behavioral difference between the two front
-  doors, not a bug). `_user_permissions(user)` (a thin wrapper that
-  fails closed to an empty set on any Keycloak error) is called once per
-  page/row render and passed into templates as `permissions`, so button
-  visibility reflects what's actually granted — see the `bff/templates/`
-  bullet below. Dialogs are HTML fragments swapped
-  into `#dialog-container` (`_form_dialog.html` for Create/Edit,
-  `_cancel_dialog.html` for Cancel, `_detail_dialog.html` for
-  View/Review/Approve/Reject).
+  **Permission enforcement (Phase 3, revised by the cancel/decision merge
+  — see `docs/MERGE_CANCEL_DECISION_PLAN.md`)**: `new_form`/
+  `create_request` and `edit_form`/`update_request` are gated by
+  `Depends(require_permission("Create"))`/`Depends(require_permission(
+  "Update"))`. Cancelling used to be its own pair of routes,
+  `cancel_form`/`cancel_request_route`, gated by
+  `Depends(require_permission("Cancel"))` — both are **gone**, folded
+  into the operator's own `operator_detail()` (dialog-open, now also
+  doubling as the Cancel dialog opener) and a new `operator_decision()`
+  (POST `/ui/operator/{id}/decision`) that hardcodes `decision=
+  "CANCELLED"` server-side (never reads it from the request body) and is
+  gated the same way, `Depends(require_permission("Cancel"))`.
+  `manager_decision` (POST `/ui/manager/{id}/decision`) branches
+  `Approve`/`Reject` via an inline `check_permission()` call based on the
+  submitted `decision` (can't be a single `Depends()` since the required
+  permission depends on request body, same reasoning as
+  `api/routes.py`'s `submit_decision`). **`manager_decision`'s
+  `require_session_role("manager")` pre-gate has been deliberately
+  removed** — it used to run before the permission check, so an operator
+  session got `403 requires role: manager` there while the REST API's
+  equivalent route (no role gate, ever) gave `403 requires permission:
+  Approve` for the exact same attempt; this asymmetry was flagged during
+  a permission-architecture audit prompted by the cancel/decision merge
+  (auditing whether any mutating action anywhere still gated on role
+  instead of Keycloak scope) and judged wrong on principle — role should
+  gate *screens*, scope/permission should gate *mutating actions*, with
+  no exceptions, and this route was the one holdover. `manager_decision`
+  now takes a plain `Depends(get_session_user)` (any logged-in session,
+  any role) and relies solely on the `check_permission()` call to reject
+  an operator, so both front doors now give the exact same 403 reason
+  for the exact same denied action — a deliberate behavioral
+  *convergence* with the REST API, not the "real behavioral difference,
+  not a bug" this bullet used to describe. `bulk_decision_form` (the
+  manager's non-mutating dialog-open/preview route) keeps its
+  `require_session_role("manager")` gate — it has no side effect beyond
+  rendering a preview, so the "role gates actions" principle doesn't
+  apply to it the way it does to the two now-ungated *mutating* routes.
+  `_user_permissions(user)` (a thin wrapper that fails closed to an empty
+  set on any Keycloak error) is called once per page/row render and
+  passed into templates as `permissions`, so button visibility reflects
+  what's actually granted — see the `bff/templates/` bullet below.
+  Dialogs are HTML fragments swapped into `#dialog-container`
+  (`_form_dialog.html` for Create/Edit, `_detail_dialog.html` for
+  View/Review/Approve/Reject/Cancel — a dedicated `_cancel_dialog.html`
+  used to exist as its own template; it's deleted, its Cancel-specific
+  markup (comment textarea + Confirm Cancel button) now lives as one
+  more conditional branch inside `_detail_dialog.html`, see the
+  `bff/templates/` bullet below).
   **Every mutating action (Save, Cancel, Approve, Reject) follows the
   same pattern**: dialog opens instantly (plain `hx-get`, no artificial
   delay), its confirm button (`type="button"`, not a form submit) reads
@@ -384,9 +476,11 @@ or `bff/` respectively; don't put front-door-specific logic in
   would otherwise still apply and blank the error dialog; see the
   `htmx4` skill's `<tr>`/`HX-Reselect` section for why). `#dialog-root`
   is the id every dialog fragment's own outer wrapper carries
-  (`_form_dialog.html`, `_cancel_dialog.html`, `_detail_dialog.html`),
-  so this reselect target is stable across all three.
-  **Bulk cancel/approve/reject selection (`docs/BULK_ACTIONS_PLAN.md`)**:
+  (`_form_dialog.html`, `_detail_dialog.html` — two templates now, not
+  three, since `_cancel_dialog.html` was deleted and folded into
+  `_detail_dialog.html`), so this reselect target is stable across both.
+  **Bulk decision selection (`docs/BULK_ACTIONS_PLAN.md`,
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`)**:
   `_bulk_selection: dict[str, set[str]]` is an in-process,
   username-keyed store (`_get_selection()`/`_clear_selection()`) — same
   "correct without a shared cache, a replica miss just shows unchecked,
@@ -396,8 +490,9 @@ or `bff/` respectively; don't put front-door-specific logic in
   **not** `require_permission("Cancel")`/etc. — marking a row "selected"
   has no side effect beyond what's rendered back to this same user, so
   it doesn't need the heavier permission check; the real enforcement
-  stays at `cancel_review()`/`submit_decision()`, invoked from the
-  execute routes below. Selection clears on a fresh `GET /ui/operator`/
+  stays at `submit_decision()` (the single merged function, covering
+  cancel/approve/reject alike), invoked from the execute routes below.
+  Selection clears on a fresh `GET /ui/operator`/
   `/ui/manager` (a real navigation/reload) and after a confirmed bulk
   action, but **not** on the periodic poll (`operator_rows()`/
   `manager_rows()` — see the select-all bullet just below for why
@@ -421,8 +516,9 @@ or `bff/` respectively; don't put front-door-specific logic in
   `_operator_row.html` bullet above — plus `hx-select="tbody"` on every
   request targeting `#request-rows` directly to pull the inner `<tbody>`
   back out). This is what keeps the header row's select-all checkbox
-  from being destroyed and rebuilt every poll cycle. The bulk-cancel/
-  bulk-approve/bulk-reject **toolbar** (count + button(s)) was pulled out
+  from being destroyed and rebuilt every poll cycle. The bulk-decision
+  **toolbar** (count + button(s), covering Cancel on the operator side
+  and Approve/Reject on the manager side alike) was pulled out
   of `<thead>` into its own standalone fragment
   (`_operator_bulk_toolbar.html`/`_manager_bulk_toolbar.html`, a `<div>`
   not a `<tr>` — sidesteps the same tag-stripping issue without needing
@@ -438,24 +534,35 @@ or `bff/` respectively; don't put front-door-specific logic in
   update (used by both) — one route still serving both cases without
   branching on which checkbox triggered it, per the original Phase 3
   design.
-  **Confirm dialog + execute (Phase 4)**: `POST
-  /ui/operator/bulk-cancel-form` → `POST /ui/operator/bulk-cancel`, and
-  `POST /ui/manager/bulk-decision-form` → `POST /ui/manager/bulk-
+  **Confirm dialog + execute (Phase 4, routes renamed by the cancel/
+  decision merge — see `docs/MERGE_CANCEL_DECISION_PLAN.md`)**: `POST
+  /ui/operator/bulk-decision-form` → `POST /ui/operator/bulk-decision`
+  (`operator_bulk_decision_form()`/`operator_bulk_decision_execute()`),
+  and `POST /ui/manager/bulk-decision-form` → `POST /ui/manager/bulk-
   decision`, mirroring the existing dialog-then-execute pattern
-  (`cancel-form` → `cancel`) but **both dialog-open routes are `POST`,
-  not `GET`** like the single-item `-form` routes — `bulk-decision-form`
-  needs `decision` in the request, and both carry `page`/`query_id`
-  forward (baked into the toolbar buttons' `hx-vals`, then round-tripped
-  through the confirm dialog's own `htmx.ajax()` call) so the execute
-  route can re-render the same list page the user was already viewing.
-  Neither route takes a `request_ids` param — both read
+  (`.../detail` → `.../decision`, per the single-item routes above) but
+  **both dialog-open routes are `POST`, not `GET`** like the single-item
+  `-form` routes — `bulk-decision-form` needs `decision` in the request
+  on the manager side, and both carry `page`/`query_id` forward (baked
+  into the toolbar buttons' `hx-vals`, then round-tripped through the
+  confirm dialog's own `htmx.ajax()` call) so the execute route can
+  re-render the same list page the user was already viewing. The
+  operator's pair used to be `bulk-cancel-form`/`bulk-cancel` — same
+  request/response shape, just renamed alongside the underlying
+  `bulk_cancel_reviews()` → `bulk_submit_decision()` merge in
+  `service.py`; the operator's route body hardcodes `decision=
+  "CANCELLED"` server-side the same way `operator_decision()` does for
+  the single-item case, so an operator's dialog-open request still
+  carries no `decision` field despite hitting the same route shape the
+  manager's does. Neither route takes a `request_ids` param — both read
   `_get_selection(user["username"])` themselves, since Phase 3 made the
-  server the sole source of truth for selection; `bulk-cancel-form`
-  additionally filters `service.get_reviews()`'s result to `requester ==
-  user["username"]` before rendering the preview, defense in depth for
-  the visibility invariant (see below) even though `_bulk_selection[
-  username]` should never actually contain another operator's id in the
-  first place. A `ValueError` from the execute call (empty selection, or
+  server the sole source of truth for selection; the operator's
+  `bulk-decision-form` additionally filters `service.get_reviews()`'s
+  result to `requester == user["username"]` before rendering the
+  preview, defense in depth for the visibility invariant (see below)
+  even though `_bulk_selection[username]` should never actually contain
+  another operator's id in the first place. A `ValueError` from the
+  execute call (empty selection, or
   over `_MAX_BULK_SIZE` — reachable if a selection spans enough pages)
   re-renders the confirm dialog with the error via
   `_RETARGET_DIALOG_HEADERS`, same pattern as every other dialog's error
@@ -524,6 +631,12 @@ or `bff/` respectively; don't put front-door-specific logic in
   {request_id}">`, including that row's action button(s) with their
   stable ids (`edit-btn-{id}`/`cancel-btn-{id}` for operator,
   `review-btn-{id}` for manager) and embedded spinner spans.
+  `cancel-btn-{id}`'s `hx-get` points at `/ui/operator/{id}/detail` —
+  the same route `review-btn-{id}` already used, now doubling as the
+  Cancel dialog opener too (it used to point at a dedicated `.../
+  cancel-form`, removed by the cancel/decision merge — see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`); the button's id and spinner are
+  otherwise unchanged.
   `_operator_list.html`/`_manager_list.html` `{% import %}` and call the
   macro once per row in their loop; `_operator_row_response.html`/
   `_manager_row_response.html` import and call the *same* macro for
@@ -595,7 +708,9 @@ or `bff/` respectively; don't put front-door-specific logic in
   before any of this, and that file's "History" section covers those.
 - **`bff/templates/_bulk_confirm_dialog.html`, `_bulk_result_dialog.html`**
   — the bulk-action counterparts of `_form_dialog.html`/
-  `_cancel_dialog.html`/`_detail_dialog.html`. One shared confirm-dialog
+  `_detail_dialog.html` (`_cancel_dialog.html`, the third single-item
+  dialog these used to also mirror, is deleted — see the `bff/ui.py`
+  bullet above). One shared confirm-dialog
   template for all three actions (`action` param: `"Cancel"`/`"Approve"`/
   `"Reject"`), following the same one-template/multiple-call-sites
   pattern as `_operator_row.html`/`_manager_row.html` rather than
@@ -668,28 +783,37 @@ or `bff/` respectively; don't put front-door-specific logic in
   invariant there is an explicit check that the cached entry's
   `filter.requester` still matches the session's username before
   trusting it — see `docs/PAGINATION_PLAN.md`'s BFF note.
-  **Bulk actions enforce this the same way, per item**: `bulk_cancel_reviews()`
-  is just N calls to `cancel_review()`, so ownership is re-checked per
+  **Bulk actions enforce this the same way, per item**: `bulk_submit_
+  decision()` is just N calls to `submit_decision()` (`decision` ∈
+  APPROVED/REJECTED/CANCELLED — a separate `bulk_cancel_reviews()` used
+  to exist as this function's sibling, fanning out over the old
+  `cancel_review()` the same way; merged away, see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`), so ownership is re-checked per
   id inside the loop, not once up front — an id for someone else's
-  request in the batch fails that one item (`PermissionError` → a
-  per-item `ok: false` result) without blocking the rest. The BFF's
-  `bulk-cancel-form` preview additionally filters `service.get_reviews()`
-  to `requester == user["username"]` before rendering, defense in depth
-  on top of that (see `bff/ui.py`'s bullet above).
+  request in a `CANCELLED` batch fails that one item (`PermissionError`
+  → a per-item `ok: false` result) without blocking the rest (this
+  ownership check is CANCELLED-only, same as the single-item case — see
+  the `workflow/service.py` bullet above). The BFF's operator-side
+  `bulk-decision-form` preview additionally filters
+  `service.get_reviews()` to `requester == user["username"]` before
+  rendering, defense in depth on top of that (see `bff/ui.py`'s bullet
+  above).
 - **Terminal states are view-only, for both roles, no exceptions.** Once
   `APPROVED`/`REJECTED`/`CANCELLED`, nobody can edit, cancel, or
   re-decide — not the requester, not any manager.
-  `update_review`/`cancel_review`/`submit_decision` in `service.py` all
-  enforce this via `status != "PENDING_REVIEW"`; the UI mirrors it by
-  only rendering action buttons on `PENDING_REVIEW` rows/dialogs. A new
-  mutation needs the same guard in `service.py` — don't rely on the UI
-  alone, since the JSON API is a second front door.
+  `update_review`/`submit_decision` in `service.py` (the latter covering
+  cancel/approve/reject alike, not a separate `cancel_review()` — see
+  the `workflow/service.py` bullet above) enforce this via `status !=
+  "PENDING_REVIEW"`; the UI mirrors it by only rendering action buttons
+  on `PENDING_REVIEW` rows/dialogs. A new mutation needs the same guard
+  in `service.py` — don't rely on the UI alone, since the JSON API is a
+  second front door.
   **Bulk actions enforce this the same way, per item** — an id that's
-  already terminal by the time `bulk_cancel_reviews()`/
-  `bulk_submit_decision()` actually reach it (raced by another action,
-  or just stale since selection happened) fails that one item with the
-  same `ValueError` the single-item route would raise, surfaced as a
-  per-item `ok: false` result rather than failing the whole batch.
+  already terminal by the time `bulk_submit_decision()` actually reaches
+  it (raced by another action, or just stale since selection happened)
+  fails that one item with the same `ValueError` the single-item route
+  would raise, surfaced as a per-item `ok: false` result rather than
+  failing the whole batch.
 - **`review_type` is immutable after creation.** Only `payload` can be
   edited. The edit form disables the review-type `<input>` for this
   reason.
@@ -697,8 +821,13 @@ or `bff/` respectively; don't put front-door-specific logic in
   terminal outcomes** (`APPROVED`, `REJECTED`, `CANCELLED`) — not
   decision-specific. A cancellation populates all three the same as a
   decision does, just with the requester as the actor and `CANCELLED` as
-  the status. `cancel_request`'s signal signature is `(self, cancelled_by:
-  str, comment: str = "")`. A fourth terminal outcome, if ever added,
+  the status. There is one `submit_decision` signal now, not a separate
+  `cancel_request` — its signature is `(self, decision: str, actor: str,
+  comment: str = "")`, `decision` covering APPROVED/REJECTED/CANCELLED
+  alike (a `cancel_request(self, cancelled_by: str, comment: str = "")`
+  signal used to carry the CANCELLED case on its own; merged away, see
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`). A fourth terminal outcome, if
+  ever added,
   should reuse these same three columns — already validated by two more
   `CANCELLED`-reaching paths added since this was written: a native
   Temporal cancel (`workflows.py`'s `except asyncio.CancelledError`,
@@ -735,14 +864,15 @@ or `bff/` respectively; don't put front-door-specific logic in
   `NULL` once that execution has been deleted out from under the row (see
   the `db/schema.sql` bullet above) — this is "no longer applicable," not
   a second scheme.
-- All terminal-transition paths (`submit_decision`, `cancel_request`
-  signals, and `workflows.py`'s native-cancel `except` block) are
-  idempotent/final-state-safe via the shared `_claim_final()` guard — a
-  synchronous check-and-set (no `await` between checking and claiming),
-  not the plain `_is_final()` read this used to be, since two paths could
-  otherwise both observe "not yet final" before either had persisted
-  anything. `update_payload` still uses plain `_is_final()`: it never
-  transitions to a terminal state, so there's no claim to race over.
+- All terminal-transition paths (the `submit_decision` signal, covering
+  APPROVED/REJECTED/CANCELLED alike, and `workflows.py`'s native-cancel
+  `except` block) are idempotent/final-state-safe via the shared
+  `_claim_final()` guard — a synchronous check-and-set (no `await`
+  between checking and claiming), not the plain `_is_final()` read this
+  used to be, since two paths could otherwise both observe "not yet
+  final" before either had persisted anything. `update_payload` still
+  uses plain `_is_final()`: it never transitions to a terminal state, so
+  there's no claim to race over.
 - All activity calls use `start_to_close_timeout` + `RetryPolicy`.
 - Ownership/status checks live in `workflow/service.py`, not in either
   front door. Both `api/routes.py` and `bff/ui.py` translate the same
@@ -920,42 +1050,51 @@ actual `ssoSessionIdleTimeout` (confirmed live via the Admin API, not
 assumed). Not started; read that file before touching
 `bff/keycloak_session.py`'s session shape or login/logout flow.
 
-## Bulk cancel / approve / reject: complete
+## Bulk decision (cancel / approve / reject): complete
 
 **`docs/BULK_ACTIONS_PLAN.md` has the full design and phased status
 tracker (all 5 phases done, verified end to end against the real local
-stack)** — lets an Operator select multiple of their own pending
-requests and cancel them in one action, or a Manager select multiple
-pending requests and approve/reject them in one action, each with a
-single shared comment applied to every selected row. Mechanically this
-is **not** a new Temporal-level primitive: every request is still its
-own workflow execution, so a bulk action is N concurrent calls to the
-existing `cancel_review()`/`submit_decision()` in `workflow/service.py`
-(`bulk_cancel_reviews()`/`bulk_submit_decision()`, capped at 50 ids per
-call via `_validate_bulk_ids()`), collected into a best-effort, per-item
-`BulkActionResult(request_id, ok, error)` list — not an atomic
-all-or-nothing transaction, which isn't meaningful across independent
-workflow executions. REST endpoints (`POST /reviews/bulk/cancel`,
-`POST /reviews/bulk/decision` — registered *before* the
+stack); `docs/MERGE_CANCEL_DECISION_PLAN.md` has the later refactor that
+folded the separate bulk-cancel code path into this one — read both**
+— lets an Operator select multiple of their own pending requests and
+cancel them in one action, or a Manager select multiple pending requests
+and approve/reject them in one action, each with a single shared comment
+applied to every selected row. Mechanically this is **not** a new
+Temporal-level primitive: every request is still its own workflow
+execution, so a bulk action is N concurrent calls to the existing
+`submit_decision()` in `workflow/service.py` (`bulk_submit_decision()`,
+capped at 50 ids per call via `_validate_bulk_ids()`), collected into a
+best-effort, per-item `BulkActionResult(request_id, ok, error)` list —
+not an atomic all-or-nothing transaction, which isn't meaningful across
+independent workflow executions. `bulk_submit_decision()` used to have a
+separate sibling, `bulk_cancel_reviews()`, fanning out over the also-now-
+merged `cancel_review()`; both are gone, cancelling is just
+`bulk_submit_decision(..., decision="CANCELLED", ...)` now (see
+`docs/MERGE_CANCEL_DECISION_PLAN.md`). The REST endpoint (`POST
+/reviews/bulk/decision` — registered *before* the
 `/reviews/{request_id}/...` routes, see `api/routes.py`'s bullet above
-for why) reuse the exact same `require_permission`/`check_permission`
-gates as their single-item counterparts. The BFF side adds row
-checkboxes + a selection toolbar + a confirm dialog listing every
-selected item before executing; the non-obvious part is that
-**selection state lives server-side** (`_bulk_selection: dict[username,
-set[request_id]]` in `bff/ui.py`, same "correct without a shared cache,
-a replica miss just shows unchecked" reasoning as `service.py`'s
-`_query_cache`), not in the browser — every row render bakes the
-correct `checked` state in directly, with zero custom selection-tracking
-JS. Selection clears on a fresh page load and after a confirmed bulk
-action; see `bff/ui.py`'s bullet above for the full mechanism (including
-why `hx-vals`'s `js:` prefix is required on each checkbox, not optional,
-and why the dialog-open routes ended up `POST` rather than the `GET` the
-plan doc originally sketched). Read `docs/BULK_ACTIONS_PLAN.md`'s
-status-tracker note before touching `workflow/service.py`'s cancel/
-decision functions or either front door's row/list templates — it
-records the handful of places the actual implementation diverged from
-the plan's original sketch.
+for why; a separate `POST /reviews/bulk/cancel` used to exist and is
+removed the same way its single-item counterpart was) reuses the exact
+same `require_permission`/`check_permission` gates as its single-item
+counterpart. The BFF side adds row checkboxes + a selection toolbar + a
+confirm dialog listing every selected item before executing; the
+non-obvious part is that **selection state lives server-side**
+(`_bulk_selection: dict[username, set[request_id]]` in `bff/ui.py`, same
+"correct without a shared cache, a replica miss just shows unchecked"
+reasoning as `service.py`'s `_query_cache`), not in the browser — every
+row render bakes the correct `checked` state in directly, with zero
+custom selection-tracking JS. Selection clears on a fresh page load and
+after a confirmed bulk action; see `bff/ui.py`'s bullet above for the
+full mechanism (including why `hx-vals`'s `js:` prefix is required on
+each checkbox, not optional, why the dialog-open routes ended up `POST`
+rather than the `GET` the plan doc originally sketched, and the
+operator-side route renames — `bulk-cancel-form`/`bulk-cancel` →
+`bulk-decision-form`/`bulk-decision` — that came with the merge). Read
+`docs/BULK_ACTIONS_PLAN.md`'s status-tracker note (and its
+`docs/MERGE_CANCEL_DECISION_PLAN.md` addendum) before touching
+`workflow/service.py`'s decision function or either front door's
+row/list templates — together they record the handful of places the
+actual implementation diverged from the original sketch.
 **The table itself no longer self-polls** — `docs/SELECT_ALL_CHECKBOX_PLAN.md`
 split it into three independently-refreshed regions (header row / a
 separate toolbar fragment / `<tbody>`) so a "select all on this page"
@@ -1068,13 +1207,14 @@ Temporal, worker — up; marked `@pytest.mark.integration`, deselect with
 adding them, prefer Temporal's `temporalio.testing.WorkflowEnvironment`
 (time-skipping test environment) over hitting a real Temporal server.
 
-Bulk cancel/approve/reject (`docs/BULK_ACTIONS_PLAN.md`) test coverage:
+Bulk decision (`docs/BULK_ACTIONS_PLAN.md`,
+`docs/MERGE_CANCEL_DECISION_PLAN.md`) test coverage:
 `tests/unit/test_service_bulk.py` (`_validate_bulk_ids()`'s
-dedup/empty/cap behavior, plus `bulk_cancel_reviews()`/
-`bulk_submit_decision()`'s fan-out/exception-handling, monkeypatching
-`cancel_review()`/`submit_decision()` rather than faking Temporal —
-what's under test there is the orchestration, not the single-item
-functions' own correctness) and, needing the real stack,
+dedup/empty/cap behavior, plus `bulk_submit_decision()`'s
+fan-out/exception-handling across all three decision values including
+CANCELLED, monkeypatching `submit_decision()` rather than faking
+Temporal — what's under test there is the orchestration, not the
+single-item function's own correctness) and, needing the real stack,
 `tests/integration/test_api_bulk.py` (REST bulk endpoints — permission
 gates, empty/over-cap `400`s, mixed eligible/terminal per-item results)
 and `tests/integration/test_bff_bulk.py` (selection isolation between

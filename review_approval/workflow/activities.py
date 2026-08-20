@@ -37,9 +37,16 @@ class PersistRequestInput:
 @dataclass
 class PersistDecisionInput:
     request_id: str
-    decision: str  # APPROVED | REJECTED
+    decision: str  # APPROVED | REJECTED | CANCELLED
     closed_by: str
     closed_comment: str
+    # Only ever set for a native Temporal cancellation (see workflows.py's
+    # wait_condition except clause) -- lets closed_at reflect the moment
+    # Temporal delivered the cancel rather than whenever this activity
+    # happens to run. Unset (None) for every normal signal-driven decision
+    # (including a regular CANCELLED), which has no separate "decided at"
+    # moment to reconcile against and just uses now() below.
+    closed_at: Optional[datetime] = None
 
 
 @activity.defn
@@ -63,6 +70,12 @@ async def persist_request(inp: PersistRequestInput) -> None:
 
 @activity.defn
 async def persist_decision(inp: PersistDecisionInput) -> None:
+    # One activity for all three terminal outcomes (APPROVED, REJECTED,
+    # CANCELLED) -- previously persist_decision (Approve/Reject) and
+    # persist_cancel were separate activities, but they wrote the same
+    # columns with the same shape (persist_cancel just hardcoded
+    # status='CANCELLED' where this always took decision as a variable);
+    # merged per docs/MERGE_CANCEL_DECISION_PLAN.md.
     pool = await _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -71,13 +84,14 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
             SET status = $2,
                 closed_by = $3,
                 closed_comment = $4,
-                closed_at = now()
+                closed_at = COALESCE($5, now())
             WHERE id = $1
             """,
             inp.request_id,
             inp.decision,
             inp.closed_by,
             inp.closed_comment,
+            inp.closed_at,
         )
 
 
@@ -85,19 +99,6 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
 class PersistUpdateInput:
     request_id: str
     payload: dict[str, Any]
-
-
-@dataclass
-class PersistCancelInput:
-    request_id: str
-    closed_by: str
-    closed_comment: str
-    # Only set for a native Temporal cancellation (see workflows.py's
-    # wait_condition except clause) -- lets closed_at reflect the moment
-    # Temporal delivered the cancel rather than whenever this activity
-    # happens to run. Unset (None) for the normal signal-driven cancel
-    # path, which has no separate "cancel time" to reconcile against.
-    closed_at: Optional[datetime] = None
 
 
 @activity.defn
@@ -112,24 +113,4 @@ async def persist_update(inp: PersistUpdateInput) -> None:
             """,
             inp.request_id,
             json.dumps(inp.payload),
-        )
-
-
-@activity.defn
-async def persist_cancel(inp: PersistCancelInput) -> None:
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE review_requests
-            SET status = 'CANCELLED',
-                closed_by = $2,
-                closed_comment = $3,
-                closed_at = COALESCE($4, now())
-            WHERE id = $1
-            """,
-            inp.request_id,
-            inp.closed_by,
-            inp.closed_comment,
-            inp.closed_at,
         )

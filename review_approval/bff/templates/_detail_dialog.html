@@ -4,13 +4,19 @@
   "rejected": "bg-red-100 text-red-800",
   "cancelled": "bg-gray-200 text-gray-700",
 } %}
-{#
-  operator_detail() doesn't pass permissions (its dialog never hits the
-  role == "manager" branch below, so it's not needed there) -- default
-  to empty rather than requiring every caller to pass it.
-#}
 {% set permissions = permissions | default([]) %}
 {% set can_decide = role == "manager" and record.status == "PENDING_REVIEW" and ("Approve" in permissions or "Reject" in permissions) %}
+{#
+  Cancel lives here too, alongside Approve/Reject -- cancelling is just
+  another decision (see docs/MERGE_CANCEL_DECISION_PLAN.md; this dialog
+  used to be View/Review/Approve/Reject only, with a separate
+  _cancel_dialog.html for the operator's Cancel flow). can_decide/
+  can_cancel are mutually exclusive in practice (role is either
+  "manager" or "operator" for any given render), kept as separate
+  named conditions rather than one combined one so each role's branch
+  stays independently readable.
+#}
+{% set can_cancel = role == "operator" and record.status == "PENDING_REVIEW" and "Cancel" in permissions %}
 <div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
   <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
     <h2 class="text-lg font-semibold mt-0 mb-4">Request Detail</h2>
@@ -83,6 +89,33 @@
         Approve
       </button>
       {% endif %}
+    </div>
+    {% elif can_cancel %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional)</label>
+      <textarea id="cancel-comment-{{ record.id }}"
+        class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm min-h-[80px]"></textarea>
+    </div>
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+      {#
+        Same pattern as every other dialog's confirm button: read the
+        comment, close the dialog immediately, then fire the request in
+        the background -- the row's own Cancel button (cancel-btn-{id},
+        replacing the old _cancel_dialog.html's identically-named
+        button) is the only thing left on screen to show progress on,
+        so that's where the spinner goes. Posts to the merged
+        .../decision route (see docs/MERGE_CANCEL_DECISION_PLAN.md) --
+        no decision field needed, that route hardcodes CANCELLED
+        server-side.
+      #}
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
+        onclick="var c = document.getElementById('cancel-comment-{{ record.id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/operator/{{ record.id }}/decision', {source: document.getElementById('cancel-btn-{{ record.id }}'), target: '#row-{{ record.id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {comment: c}})">
+        Confirm Cancel
+      </button>
     </div>
     {% else %}
     <div class="flex justify-end gap-2 mt-5">

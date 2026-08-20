@@ -6,21 +6,21 @@
 > `docs/SESSION_STORE_PLAN.md`, `docs/BULK_ACTIONS_PLAN.md`,
 > `docs/SELECT_ALL_CHECKBOX_PLAN.md`).
 >
-> - [ ] Phase 1 — `workflow/workflows.py`: fold `cancel_request` into
+> - [x] Phase 1 — `workflow/workflows.py`: fold `cancel_request` into
 >       `submit_decision`; `VALID_DECISIONS` gains `"CANCELLED"`
-> - [ ] Phase 2 — `workflow/activities.py`: fold `persist_cancel` into
+> - [x] Phase 2 — `workflow/activities.py`: fold `persist_cancel` into
 >       `persist_decision`; delete `PersistCancelInput`/`persist_cancel`
-> - [ ] Phase 3 — `workflow/worker.py`: update the registered-activities
+> - [x] Phase 3 — `workflow/worker.py`: update the registered-activities
 >       list to match Phase 2
-> - [ ] Phase 4 — `workflow/service.py`: fold `cancel_review()` into
+> - [x] Phase 4 — `workflow/service.py`: fold `cancel_review()` into
 >       `submit_decision()`, `bulk_cancel_reviews()` into
 >       `bulk_submit_decision()`; conditional ownership check by
 >       decision type
-> - [ ] Phase 5 — `api/routes.py`: remove `/reviews/{id}/cancel` and
+> - [x] Phase 5 — `api/routes.py`: remove `/reviews/{id}/cancel` and
 >       `/reviews/bulk/cancel`; `/reviews/{id}/decision` and
 >       `/reviews/bulk/decision` gain 3-way permission branching and a
 >       `PermissionError` → 403 handler
-> - [ ] Phase 6 — `bff/ui.py` + templates: remove
+> - [x] Phase 6 — `bff/ui.py` + templates: remove
 >       `cancel-form`/`cancel`/`bulk-cancel-form`/`bulk-cancel` operator
 >       routes and `_cancel_dialog.html`; fold Cancel into
 >       `_detail_dialog.html` (operator variant) and rename
@@ -31,15 +31,17 @@
 >       real Keycloak permission check is sufficient on its own, same as
 >       the REST API already relies on with no role gate at all;
 >       `require_session_role()` stays only on `GET` page/detail routes
-> - [ ] Phase 7 — tests: update every test referencing the removed
+> - [x] Phase 7 — tests: update every test referencing the removed
 >       routes/functions/templates across `tests/unit/` and
 >       `tests/integration/`
-> - [ ] Phase 8 — docs: `CLAUDE.md` (extensive — this touches nearly
+> - [x] Phase 8 — docs: `CLAUDE.md` (extensive — this touches nearly
 >       every bullet describing the cancel/decision split),
 >       `docs/BULK_ACTIONS_PLAN.md` (status-tracker note), Keycloak
 >       docs unchanged (see "Decisions already made")
 >
-> Not started. Confirmed with the user before writing this plan: full
+> **All 8 phases complete.** Full test suite (95 tests) passes, `ruff
+> check` clean across `review_approval/` and `tests/`. Confirmed with
+> the user before writing this plan: full
 > consolidation, not a thin-alias approach — `/reviews/{id}/cancel` and
 > `/reviews/bulk/cancel` are removed entirely, not kept as
 > backward-compatible wrappers. This is a breaking REST API change,

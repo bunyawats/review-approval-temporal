@@ -1,7 +1,8 @@
 {#
-  Rendered by the bulk execute routes (bulk-cancel, bulk-decision) after
-  service.bulk_cancel_reviews()/bulk_submit_decision() return their
-  per-item results. Swapped into #dialog-container; the caller appends
+  Rendered by the bulk-decision execute routes (operator and manager both
+  post to their own bulk-decision, per docs/MERGE_CANCEL_DECISION_PLAN.md)
+  after service.bulk_submit_decision() returns its per-item results.
+  Swapped into #dialog-container; the caller appends
   an OOB-refreshed #request-list table right after this fragment in the
   same response (see docs/BULK_ACTIONS_PLAN.md's "Results + table
   refresh") -- that's assembled by the route, not this template, since

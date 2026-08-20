@@ -37,7 +37,22 @@
 > the page at all (i.e. the user holds the relevant permission) --
 > keeping the column's own header/body alignment intact matters more
 > here than the literal "only render the checkbox `<td>` when
-> `can_select`" phrasing below.
+> `can_select` phrasing below.
+>
+> **Addendum (superseded naming, see `docs/MERGE_CANCEL_DECISION_PLAN.md`):**
+> the separate bulk-cancel code path this file describes throughout
+> (`bulk_cancel_reviews()` in `workflow/service.py`; `POST
+> /reviews/bulk/cancel` in `api/routes.py`; `bulk-cancel-form`/
+> `bulk-cancel` in `bff/ui.py`) has since been merged into
+> `bulk_submit_decision()`/`POST /reviews/bulk/decision`/
+> `bulk-decision-form`/`bulk-decision`, the same routes this file
+> already describes for approve/reject, now also handling
+> `decision="CANCELLED"`. The design below (selection store, dialog,
+> execute, table refresh) is otherwise unchanged — only the cancel-
+> specific function/route names it references are gone. Read
+> `docs/MERGE_CANCEL_DECISION_PLAN.md` for the full rationale and the
+> permission-architecture decision (drop role-based gating) that came
+> with it.
 
 ## Decisions already made (don't re-litigate without new information)
 

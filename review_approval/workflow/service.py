@@ -18,14 +18,15 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from review_approval.workflow.schemas import validate_payload
 from review_approval.workflow.task_queues import KNOWN_REVIEW_TYPES, task_queue_for_review_type
-from review_approval.workflow.workflows import ReviewApprovalWorkflow, ReviewRequestInput
+from review_approval.workflow.workflows import VALID_DECISIONS, ReviewApprovalWorkflow, ReviewRequestInput
 
 # client.start_workflow()/handle.signal() only wait for Temporal to accept
 # the start/signal -- NOT for the workflow to run its handler or for the
 # resulting persist_* activity to actually commit to Postgres. That happens
 # asynchronously, whenever a worker process picks up the workflow/activity
-# task. Without this, create_review/cancel_review/submit_decision/
-# update_review could return before their write lands, so a caller that
+# task. Without this, create_review/update_review/submit_decision
+# (covering cancel/approve/reject alike) could return before their write
+# lands, so a caller that
 # immediately re-queries Postgres (e.g. to re-render a list) can see stale
 # data -- on a local dev box this race is usually won by luck (everything's
 # fast and on localhost), not by anything the code actually guarantees.
@@ -214,8 +215,8 @@ async def _reconcile_missing_workflow(pool: asyncpg.Pool, request_id: str) -> No
     """Recover from a Temporal admin deleting the workflow execution out from
     under a still-PENDING_REVIEW row (`temporal workflow delete`, not just a
     cancel/terminate) -- there is no workflow left to signal, and no
-    execution left to host a persist_cancel activity through, so this writes
-    directly to Postgres instead of going through the normal
+    execution left to host a persist_decision activity through, so this
+    writes directly to Postgres instead of going through the normal
     workflow/activity path (the one deliberate exception to "activities.py
     is the only file allowed to talk to Postgres": that rule is about
     durable writes going through Temporal, which is meaningless once
@@ -288,57 +289,50 @@ async def update_review(
     await _wait_until(pool, request_id, lambda record: record["payload"] == validated)
 
 
-async def cancel_review(
-    client: Client,
-    pool: asyncpg.Pool,
-    request_id: str,
-    requester: str,
-    comment: str = "",
-) -> None:
-    record = await get_review(pool, request_id)
-    if record is None:
-        raise LookupError("review not found")
-    if record["requester"] != requester:
-        raise PermissionError(
-            "only the requester who created this review can cancel it"
-        )
-    if record["status"] != "PENDING_REVIEW":
-        raise ValueError("this review is no longer cancellable")
-    handle = client.get_workflow_handle(workflow_id(request_id))
-    await _signal_or_reconcile(
-        pool,
-        handle,
-        request_id,
-        ReviewApprovalWorkflow.cancel_request,
-        [requester, comment],
-    )
-    # signal() only confirms Temporal accepted it -- wait for persist_cancel
-    # to actually write status='CANCELLED' before returning.
-    await _wait_until(pool, request_id, lambda record: record["status"] == "CANCELLED")
-
-
 async def submit_decision(
     client: Client,
     pool: asyncpg.Pool,
     request_id: str,
     decision: str,
-    closed_by: str,
-    comment: str,
+    actor: str,
+    comment: str = "",
 ) -> None:
-    if decision not in ("APPROVED", "REJECTED"):
-        raise ValueError("decision must be APPROVED or REJECTED")
+    """The single mutation for all three terminal outcomes -- APPROVED,
+    REJECTED, CANCELLED (see docs/MERGE_CANCEL_DECISION_PLAN.md; this used
+    to be Approve/Reject-only, with a separate cancel_review() for
+    CANCELLED). `actor` is whoever is closing the request: a manager for
+    APPROVED/REJECTED, the request's own requester for CANCELLED --
+    enforced below, not by the caller.
+
+    Ownership is deliberately *not* a single unified rule, because it was
+    never the same rule for both: cancelling requires actor == requester
+    (only the requester who created a review may cancel it); approving/
+    rejecting has no ownership check at all (any caller holding the
+    Approve/Reject permission may decide, same as always -- permission
+    itself is enforced by the front door, not here). Status is checked
+    *before* the ownership branch, so a wrong-requester cancel attempt on
+    an already-terminal row still raises the "already been decided"
+    ValueError, not a PermissionError -- matching this function's
+    pre-merge behavior for cancel exactly.
+    """
+    if decision not in VALID_DECISIONS:
+        raise ValueError(f"decision must be one of {VALID_DECISIONS}")
     record = await get_review(pool, request_id)
     if record is None:
         raise LookupError("review not found")
     if record["status"] != "PENDING_REVIEW":
         raise ValueError("this review has already been decided")
+    if decision == "CANCELLED" and record["requester"] != actor:
+        raise PermissionError(
+            "only the requester who created this review can cancel it"
+        )
     handle = client.get_workflow_handle(workflow_id(request_id))
     await _signal_or_reconcile(
         pool,
         handle,
         request_id,
         ReviewApprovalWorkflow.submit_decision,
-        [decision, closed_by, comment],
+        [decision, actor, comment],
     )
     # signal() only confirms Temporal accepted it -- wait for persist_decision
     # to actually write the new status before returning.
@@ -348,11 +342,12 @@ async def submit_decision(
 # Bulk cancel/approve/reject (see docs/BULK_ACTIONS_PLAN.md). Every review
 # request is its own Temporal workflow execution -- there's no "signal N
 # workflow ids in one call" primitive -- so a bulk action is mechanically N
-# concurrent calls to the single-item functions above, collected into a
+# concurrent calls to the single-item function above, collected into a
 # best-effort, per-item result list. This is a thin orchestration layer, not
 # a new code path with its own ownership/status logic: reusing
-# cancel_review()/submit_decision() means a bulk action inherits deleted-
-# workflow recovery, the already-decided guard, etc. for free.
+# submit_decision() means a bulk action inherits deleted-workflow recovery,
+# the already-decided guard, the CANCELLED-only ownership check, etc. for
+# free.
 _MAX_BULK_SIZE = 50  # generous for a POC; see docs/BULK_ACTIONS_PLAN.md's
 # "Operational considerations" -- caps concurrent Postgres connections +
 # Temporal RPCs one bulk request can hold from the pool at once.
@@ -388,42 +383,28 @@ async def get_reviews(pool: asyncpg.Pool, request_ids: list[str]) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def bulk_cancel_reviews(
-    client: Client,
-    pool: asyncpg.Pool,
-    request_ids: list[str],
-    requester: str,
-    comment: str = "",
-) -> list[BulkActionResult]:
-    ids = _validate_bulk_ids(request_ids)
-
-    async def _one(request_id: str) -> BulkActionResult:
-        try:
-            await cancel_review(client, pool, request_id, requester, comment)
-            return BulkActionResult(request_id, True)
-        except (LookupError, PermissionError, ValueError) as e:
-            return BulkActionResult(request_id, False, str(e))
-
-    return list(await asyncio.gather(*(_one(rid) for rid in ids)))
-
-
 async def bulk_submit_decision(
     client: Client,
     pool: asyncpg.Pool,
     request_ids: list[str],
     decision: str,
-    closed_by: str,
+    actor: str,
     comment: str = "",
 ) -> list[BulkActionResult]:
     ids = _validate_bulk_ids(request_ids)
-    if decision not in ("APPROVED", "REJECTED"):
-        raise ValueError("decision must be APPROVED or REJECTED")
+    if decision not in VALID_DECISIONS:
+        raise ValueError(f"decision must be one of {VALID_DECISIONS}")
 
     async def _one(request_id: str) -> BulkActionResult:
         try:
-            await submit_decision(client, pool, request_id, decision, closed_by, comment)
+            await submit_decision(client, pool, request_id, decision, actor, comment)
             return BulkActionResult(request_id, True)
-        except (LookupError, ValueError) as e:
+        except (LookupError, PermissionError, ValueError) as e:
+            # PermissionError is only reachable here for decision=CANCELLED
+            # (a stale/foreign id slipping into a batch of otherwise-own
+            # ids) -- surfaces as a per-item failure, not a whole-batch
+            # exception, same best-effort semantics as every other error
+            # type here.
             return BulkActionResult(request_id, False, str(e))
 
     return list(await asyncio.gather(*(_one(rid) for rid in ids)))

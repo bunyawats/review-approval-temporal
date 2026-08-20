@@ -25,6 +25,7 @@ from review_approval.bff.keycloak_session import (
     build_authorize_url,
     check_permission,
     complete_login,
+    get_session_user,
     logout,
     logout_redirect_url,
     require_permission,
@@ -207,7 +208,7 @@ async def logout_submit(request: Request):
 
 
 async def _resolve_operator_page(pool: asyncpg.Pool, user: dict, page: int, query_id: str) -> service.PagedReviews:
-    """Shared by operator_list() and the bulk-cancel execute route (both
+    """Shared by operator_list() and the bulk-decision execute route (both
     need to re-render the same list page a user was already on) -- see
     operator_list()'s own docstring-length comment for why the cached
     filter's requester has to be re-checked against this session before
@@ -509,29 +510,39 @@ async def update_request(
     return _render(request, "_operator_row_response.html", {"record": updated, "permissions": permissions})
 
 
-@router.get("/operator/{request_id}/cancel-form", response_class=HTMLResponse)
-async def cancel_form(request: Request, request_id: str, user: dict = Depends(require_permission("Cancel"))):
+@router.get("/operator/{request_id}/detail", response_class=HTMLResponse)
+async def operator_detail(request: Request, request_id: str, user: dict = Depends(require_session_role("operator"))):
+    # Also the dialog-opener for Cancel (replaces the old dedicated
+    # .../cancel-form route + _cancel_dialog.html -- see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md). permissions now has to be
+    # computed here, unlike before this merge, since _detail_dialog.html's
+    # Cancel branch needs to know whether "Cancel" is actually granted --
+    # the manager side already needed this for its Approve/Reject branch.
     _, pool = _clients(request)
     record = await service.get_review(pool, request_id)
     if record is None or record["requester"] != user["username"]:
         raise HTTPException(status_code=404)
+    permissions = await _user_permissions(user)
     return _render(
-        request,
-        "_cancel_dialog.html",
-        {"request_id": request_id, "review_type": record["review_type"]},
+        request, "_detail_dialog.html", {"record": record, "role": "operator", "permissions": permissions}
     )
 
 
-@router.post("/operator/{request_id}/cancel", response_class=HTMLResponse)
-async def cancel_request_route(
+@router.post("/operator/{request_id}/decision", response_class=HTMLResponse)
+async def operator_decision(
     request: Request,
     request_id: str,
     comment: str = Form(""),
     user: dict = Depends(require_permission("Cancel")),
 ):
+    # Replaces the old dedicated .../cancel route -- decision is hardcoded
+    # here, never read from the request body, since an operator session
+    # can never legitimately submit anything but CANCELLED (see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md). No 3-way branch needed on this
+    # side, only on the REST API's single shared endpoint.
     client, pool = _clients(request)
     try:
-        await service.cancel_review(client, pool, request_id, user["username"], comment)
+        await service.submit_decision(client, pool, request_id, "CANCELLED", user["username"], comment)
     except (LookupError, PermissionError, ValueError):
         pass  # POC: swallow and just show current true state on refresh
     updated = await service.get_review(pool, request_id)
@@ -544,22 +555,17 @@ async def cancel_request_route(
     return _render(request, "_operator_row_response.html", {"record": updated, "permissions": permissions})
 
 
-@router.get("/operator/{request_id}/detail", response_class=HTMLResponse)
-async def operator_detail(request: Request, request_id: str, user: dict = Depends(require_session_role("operator"))):
-    _, pool = _clients(request)
-    record = await service.get_review(pool, request_id)
-    if record is None or record["requester"] != user["username"]:
-        raise HTTPException(status_code=404)
-    return _render(request, "_detail_dialog.html", {"record": record, "role": "operator"})
-
-
-@router.post("/operator/bulk-cancel-form", response_class=HTMLResponse)
-async def bulk_cancel_form(
+@router.post("/operator/bulk-decision-form", response_class=HTMLResponse)
+async def operator_bulk_decision_form(
     request: Request,
     page: int = Form(0),
     query_id: str = Form(""),
     user: dict = Depends(require_permission("Cancel")),
 ):
+    # Replaces the old .../bulk-cancel-form route, renamed to match
+    # manager's bulk-decision-form naming (see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md). decision is hardcoded
+    # CANCELLED, same reasoning as operator_decision() above.
     _, pool = _clients(request)
     ids = _get_selection(user["username"])
     items = await service.get_reviews(pool, list(ids))
@@ -575,7 +581,7 @@ async def bulk_cancel_form(
         {
             "action": "Cancel",
             "items": items,
-            "post_url": "/ui/operator/bulk-cancel",
+            "post_url": "/ui/operator/bulk-decision",
             "role": "operator",
             "decision": None,
             "page": page,
@@ -584,18 +590,21 @@ async def bulk_cancel_form(
     )
 
 
-@router.post("/operator/bulk-cancel", response_class=HTMLResponse)
-async def bulk_cancel_execute(
+@router.post("/operator/bulk-decision", response_class=HTMLResponse)
+async def operator_bulk_decision_execute(
     request: Request,
     comment: str = Form(""),
     page: int = Form(0),
     query_id: str = Form(""),
     user: dict = Depends(require_permission("Cancel")),
 ):
+    # Replaces the old .../bulk-cancel route -- decision hardcoded
+    # CANCELLED, never read from the request body, same reasoning as
+    # operator_decision() above.
     client, pool = _clients(request)
     ids = _get_selection(user["username"])
     try:
-        results = await service.bulk_cancel_reviews(client, pool, list(ids), user["username"], comment)
+        results = await service.bulk_submit_decision(client, pool, list(ids), "CANCELLED", user["username"], comment)
     except ValueError as e:
         # Empty selection or over the _MAX_BULK_SIZE cap (the latter only
         # reachable if a selection spans enough pages to exceed it) --
@@ -609,7 +618,7 @@ async def bulk_cancel_execute(
             {
                 "action": "Cancel",
                 "items": items,
-                "post_url": "/ui/operator/bulk-cancel",
+                "post_url": "/ui/operator/bulk-decision",
                 "role": "operator",
                 "decision": None,
                 "page": page,
@@ -621,7 +630,7 @@ async def bulk_cancel_execute(
         )
     # An id can legitimately go stale between selection and this point
     # (someone else acted on it) -- fine, that's exactly the best-effort,
-    # per-item-results semantics; bulk_cancel_reviews() already reflects it.
+    # per-item-results semantics; bulk_submit_decision() already reflects it.
     _clear_selection(user["username"])
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
@@ -793,8 +802,15 @@ async def bulk_decision_execute(
     comment: str = Form(""),
     page: int = Form(0),
     query_id: str = Form(""),
-    user: dict = Depends(require_session_role("manager")),
+    user: dict = Depends(get_session_user),
 ):
+    # No require_session_role("manager") gate here (see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md's permission-architecture
+    # decision) -- the real Keycloak permission check below is
+    # sufficient on its own, same as the REST API relies on with no role
+    # gate at all. get_session_user still applies (a route can't be
+    # reached with no session at all); it's specifically the role check
+    # being dropped, not authentication itself.
     permission = "Approve" if decision == "APPROVED" else "Reject"
     await check_permission(user, permission)
     client, pool = _clients(request)
@@ -853,8 +869,16 @@ async def manager_decision(
     request_id: str,
     decision: str = Form(...),
     comment: str = Form(""),
-    user: dict = Depends(require_session_role("manager")),
+    user: dict = Depends(get_session_user),
 ):
+    # No require_session_role("manager") gate here (see
+    # docs/MERGE_CANCEL_DECISION_PLAN.md's permission-architecture
+    # decision) -- the real Keycloak permission check below is
+    # sufficient on its own, same as the REST API relies on with no role
+    # gate at all, and same as bulk_decision_execute() above.
+    # get_session_user still applies; it's specifically the role check
+    # being dropped, not authentication itself.
+    #
     # Approve/reject need different permissions -- which one depends on
     # the submitted decision, so this can't be expressed as a single
     # Depends(require_permission(...)); check it explicitly instead.

@@ -1,7 +1,8 @@
 """
 JSON REST API: real Keycloak JWT auth (auth.py), for actual
 clients/integrations -- as opposed to bff/ui.py's /ui/* routes, which
-use mock session auth for the POC demo UI only.
+use a real Keycloak session (Authorization Code flow, see
+bff/keycloak_session.py) for the server-rendered HTMX UI.
 
 Both front doors call the same workflow/service.py functions, so
 business rules (ownership checks, status checks, payload validation)
@@ -25,11 +26,7 @@ class CreateReviewRequest(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    decision: str  # APPROVED | REJECTED
-    comment: str = ""
-
-
-class CancelRequest(BaseModel):
+    decision: str  # APPROVED | REJECTED | CANCELLED
     comment: str = ""
 
 
@@ -45,15 +42,20 @@ class ReviewSearchRequest(BaseModel):
     filter: Optional[ReviewSearchFilter] = None
 
 
-class BulkCancelRequest(BaseModel):
-    request_ids: list[str]
-    comment: str = ""
-
-
 class BulkDecisionRequest(BaseModel):
     request_ids: list[str]
-    decision: str  # APPROVED | REJECTED
+    decision: str  # APPROVED | REJECTED | CANCELLED
     comment: str = ""
+
+
+# Cancelling is just another decision (see docs/MERGE_CANCEL_DECISION_PLAN.md
+# -- this used to be a separate POST /reviews/{id}/cancel + CancelRequest
+# body, with its own Cancel-permission-only route). One lookup, shared by
+# both the single-item and bulk decision routes below, so the mapping is
+# never defined twice. Keycloak itself is unchanged by this merge -- Create/
+# Update/Cancel/Approve/Reject stay five independent Scopes on the single
+# RequestApproval Resource; this dict just picks which one applies.
+_DECISION_PERMISSIONS = {"APPROVED": "Approve", "REJECTED": "Reject", "CANCELLED": "Cancel"}
 
 
 @router.post("/reviews", status_code=201)
@@ -86,40 +88,26 @@ def _bulk_response(results: list[service.BulkActionResult]) -> dict:
 
 
 # Registered before the /reviews/{request_id}/... routes below: FastAPI
-# matches path routes in registration order, and "/reviews/bulk/cancel"
-# has the same 3-segment shape as "/reviews/{request_id}/cancel" -- if the
+# matches path routes in registration order, and "/reviews/bulk/decision"
+# has the same 3-segment shape as "/reviews/{request_id}/decision" -- if the
 # parameterized route were registered first, it would swallow this one with
-# request_id="bulk". Same reasoning applies to bulk/decision vs.
-# {request_id}/decision.
-@router.post("/reviews/bulk/cancel")
-async def bulk_cancel_reviews(
-    body: BulkCancelRequest,
-    request: Request,
-    user: dict = Depends(require_permission("Cancel")),
-):
-    try:
-        results = await service.bulk_cancel_reviews(
-            request.app.state.temporal_client,
-            request.app.state.pg_pool,
-            body.request_ids,
-            user["sub"],
-            body.comment,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return _bulk_response(results)
-
-
+# request_id="bulk".
 @router.post("/reviews/bulk/decision")
 async def bulk_submit_decision(
     body: BulkDecisionRequest,
     request: Request,
     user: dict = Depends(get_current_user),
 ):
-    # Approve/reject need different permissions -- which one depends on the
-    # request body, same reasoning as the single-item decision route below.
-    permission = "Approve" if body.decision == "APPROVED" else "Reject"
-    await check_permission(user, permission)
+    # Which permission depends on the request body (Cancel/Approve/Reject),
+    # so this can't be expressed as a single Depends(require_permission(...));
+    # check it explicitly instead. An unrecognized decision value skips the
+    # permission check entirely (there's no scope for "garbage") and falls
+    # straight through to service.bulk_submit_decision()'s own ValueError,
+    # mapped to 400 below -- never silently defaults to some other
+    # permission.
+    permission = _DECISION_PERMISSIONS.get(body.decision)
+    if permission is not None:
+        await check_permission(user, permission)
     try:
         results = await service.bulk_submit_decision(
             request.app.state.temporal_client,
@@ -166,31 +154,6 @@ async def update_review(
     return {"status": "update_sent"}
 
 
-@router.post("/reviews/{request_id}/cancel")
-async def cancel_review(
-    request_id: str,
-    request: Request,
-    user: dict = Depends(require_permission("Cancel")),
-    body: Optional[CancelRequest] = None,
-):
-    comment = body.comment if body else ""
-    try:
-        await service.cancel_review(
-            request.app.state.temporal_client,
-            request.app.state.pg_pool,
-            request_id,
-            user["sub"],
-            comment,
-        )
-    except LookupError:
-        raise HTTPException(status_code=404, detail="review not found")
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "cancel_sent"}
-
-
 @router.post("/reviews/{request_id}/decision")
 async def submit_decision(
     request_id: str,
@@ -198,11 +161,11 @@ async def submit_decision(
     request: Request,
     user: dict = Depends(get_current_user),
 ):
-    # Approve/reject need different permissions -- which one depends on
-    # the request body, so this can't be expressed as a single
-    # Depends(require_permission(...)); check it explicitly instead.
-    permission = "Approve" if body.decision == "APPROVED" else "Reject"
-    await check_permission(user, permission)
+    # Same permission-by-decision-value pattern as the bulk route above --
+    # see _DECISION_PERMISSIONS' comment.
+    permission = _DECISION_PERMISSIONS.get(body.decision)
+    if permission is not None:
+        await check_permission(user, permission)
     try:
         await service.submit_decision(
             request.app.state.temporal_client,
@@ -214,6 +177,12 @@ async def submit_decision(
         )
     except LookupError:
         raise HTTPException(status_code=404, detail="review not found")
+    except PermissionError as e:
+        # Only reachable for decision="CANCELLED" (wrong-requester attempt)
+        # -- Approve/Reject never raise this. Easy to forget when merging
+        # cancel into this route: omitting this handler would turn a
+        # wrong-requester cancel attempt into an unhandled 500.
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "signal_sent"}

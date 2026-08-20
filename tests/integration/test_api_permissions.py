@@ -95,20 +95,46 @@ def test_manager_cannot_update(client, tokens):
 
 
 def test_operator_can_cancel_own_pending_request(client, tokens):
+    # Cancelling is just another decision now (POST /reviews/{id}/cancel
+    # was removed -- see docs/MERGE_CANCEL_DECISION_PLAN.md).
     request_id = _create_as(client, tokens["operator2"])
     response = client.post(
-        f"/reviews/{request_id}/cancel", headers=_auth(tokens["operator2"]), json={"comment": "changed my mind"}
+        f"/reviews/{request_id}/decision",
+        headers=_auth(tokens["operator2"]),
+        json={"decision": "CANCELLED", "comment": "changed my mind"},
     )
     assert response.status_code == 200
 
 
 def test_manager_cannot_cancel(client, tokens):
+    # Manager holds Approve/Reject, not Cancel -- this is the "new case,
+    # not reachable before the merge" cell from
+    # docs/MERGE_CANCEL_DECISION_PLAN.md's permission-branch matrix
+    # (decision used to be Approve/Reject-only on this endpoint).
     request_id = _create_as(client, tokens["operator1"])
     response = client.post(
-        f"/reviews/{request_id}/cancel", headers=_auth(tokens["manager1"]), json={"comment": "not my job"}
+        f"/reviews/{request_id}/decision",
+        headers=_auth(tokens["manager1"]),
+        json={"decision": "CANCELLED", "comment": "not my job"},
     )
     assert response.status_code == 403
     assert "Cancel" in response.json()["detail"]
+
+
+def test_operator_cannot_cancel_someone_elses_request(client, tokens):
+    # Ownership, not permission -- operator2 legitimately holds Cancel,
+    # but this isn't their request. service.submit_decision()'s
+    # PermissionError must map to 403, not an unhandled 500 (easy to
+    # forget when merging cancel into decision -- Approve/Reject never
+    # raised PermissionError on this route before).
+    request_id = _create_as(client, tokens["operator1"])
+    response = client.post(
+        f"/reviews/{request_id}/decision",
+        headers=_auth(tokens["operator2"]),
+        json={"decision": "CANCELLED", "comment": "not yours"},
+    )
+    assert response.status_code == 403
+    assert "requester" in response.json()["detail"]
 
 
 # ------------------------------------------------------------------ decision ----

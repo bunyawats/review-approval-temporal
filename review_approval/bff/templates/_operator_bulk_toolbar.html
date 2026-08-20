@@ -24,7 +24,7 @@
   <button type="button"
     class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
     {% if not selected_ids %}disabled{% endif %}
-    hx-post="/ui/operator/bulk-cancel-form" hx-target="#dialog-container" hx-swap="innerHTML"
+    hx-post="/ui/operator/bulk-decision-form" hx-target="#dialog-container" hx-swap="innerHTML"
     hx-vals='{"page": {{ page }}, "query_id": "{{ query_id }}"}'>Bulk Cancel</button>
 </div>
 {% endif %}

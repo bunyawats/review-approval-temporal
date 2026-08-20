@@ -43,7 +43,6 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from review_approval.workflow.activities import (
-    persist_cancel,
     persist_decision,
     persist_request,
     persist_update,
@@ -57,7 +56,7 @@ VALID_MODES = ("both", "workflow", "activity")
 def _build_worker(client: Client, task_queue: str, mode: str) -> Worker:
     workflows = [ReviewApprovalWorkflow] if mode in ("both", "workflow") else []
     activities = (
-        [persist_request, persist_decision, persist_update, persist_cancel]
+        [persist_request, persist_decision, persist_update]
         if mode in ("both", "activity")
         else []
     )
