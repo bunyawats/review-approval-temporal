@@ -706,6 +706,39 @@ actual `ssoSessionIdleTimeout` (confirmed live via the Admin API, not
 assumed). Not started; read that file before touching
 `bff/keycloak_session.py`'s session shape or login/logout flow.
 
+## Bulk cancel / approve / reject: planned
+
+**`docs/BULK_ACTIONS_PLAN.md` has the full design and phased status
+tracker** — lets an Operator select multiple of their own pending
+requests and cancel them in one action, or a Manager select multiple
+pending requests and approve/reject them in one action, each with a
+single shared comment applied to every selected row. Mechanically this
+is **not** a new Temporal-level primitive: every request is still its
+own workflow execution, so a bulk action is N concurrent calls to the
+existing `cancel_review()`/`submit_decision()` in `workflow/service.py`
+(new `bulk_cancel_reviews()`/`bulk_submit_decision()` wrappers, capped at
+50 ids per call), collected into a best-effort, per-item
+`{request_id, ok, error}` result list — not an atomic
+all-or-nothing transaction, which isn't meaningful across independent
+workflow executions. New REST endpoints (`POST /reviews/bulk/cancel`,
+`POST /reviews/bulk/decision`) reuse the exact same
+`require_permission`/`check_permission` gates as their single-item
+counterparts. The BFF side adds row checkboxes + a selection toolbar +
+a confirm dialog listing every selected item before executing; the
+non-obvious part is that **selection state lives server-side** (a small
+in-process `dict[username, set[request_id]]` in `bff/ui.py`, same
+"correct without a shared cache, a replica miss just shows unchecked"
+reasoning as `service.py`'s `_query_cache`), not in the browser — every
+row render bakes the correct `checked` state in directly, which is what
+lets the table's existing 5-second self-poll (`outerHTML`-replacing
+`<table id="request-list">`) coexist with checkboxes at all, with zero
+custom selection-tracking JS. Selection clears on a fresh page load and
+after a confirmed bulk action; see that file's "BFF: selection UI"
+section for the full mechanism (including why `hx-vals`'s `js:` prefix
+is required on each checkbox, not optional). Not started; read that file
+before touching `workflow/service.py`'s cancel/decision functions or
+either front door's row/list templates.
+
 ## Known gaps
 
 - Temporal Web UI's Keycloak integration is authentication-only (gates
