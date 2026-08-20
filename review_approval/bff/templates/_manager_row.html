@@ -1,4 +1,4 @@
-{% macro manager_row(r, permissions=[], selected_ids=[]) %}
+{% macro manager_row(r, permissions=[], selected_ids=[], page=0, query_id="") %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",
@@ -26,10 +26,15 @@
   {% if has_select_column %}
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
     {% if can_select %}
+    {#
+      request_ids is a single comma-joined *string*, not a JS array --
+      see _operator_row.html's matching comment for why (a confirmed
+      htmx4 FormData.set() coercion behavior, not an assumption).
+    #}
     <input type="checkbox" name="request_ids" value="{{ r.id }}"
       {% if r.id in selected_ids %}checked{% endif %}
       hx-post="/ui/manager/bulk-select" hx-swap="none"
-      hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked": event.target.checked}'>
+      hx-vals='js:{"request_ids": "{{ r.id }}", "checked": event.target.checked, "page": {{ page }}, "query_id": "{{ query_id }}"}'>
     {% endif %}
   </td>
   {% endif %}

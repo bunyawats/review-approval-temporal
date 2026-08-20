@@ -1,0 +1,17 @@
+{#
+  Manager counterpart of _operator_rows_body.html -- see that file's
+  comment for the split-poll-target reasoning and the hx-select="tbody"
+  requirement.
+#}
+{% import "_manager_row.html" as row_macros %}
+{% set num_columns = 6 + (1 if ("Approve" in permissions or "Reject" in permissions) else 0) %}
+<tbody id="request-rows"
+  hx-post="/ui/manager/rows" hx-trigger="every 5s [!document.querySelector('.htmx-request')]"
+  hx-select="tbody" hx-swap="outerHTML"
+  hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'>
+  {% for r in paged.items %}
+  {{ row_macros.manager_row(r, permissions, selected_ids, paged.page, paged.query_id) }}
+  {% else %}
+  <tr><td colspan="{{ num_columns }}" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
+  {% endfor %}
+</tbody>

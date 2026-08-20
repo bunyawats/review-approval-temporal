@@ -1,0 +1,30 @@
+{#
+  Extracted from _operator_list.html's <thead> into its own standalone
+  fragment (docs/SELECT_ALL_CHECKBOX_PLAN.md) -- a <div>, not a <tr>,
+  specifically so it parses correctly wherever it lands. An OOB swap
+  target doesn't get free table-context parsing the way content already
+  inside a live <table> does; a <tr>/<td> fragment dropped outside one
+  hits the same tag-stripping issue _operator_row_response.html works
+  around with a <table><tbody> wrapper -- a <div> sidesteps that
+  entirely, no wrapper needed.
+
+  Context: permissions, selected_ids, page, query_id (baked into the
+  Bulk Cancel button's own hx-vals so its dialog/execute round trip
+  lands back on the page the user is actually viewing), oob (bool --
+  true for every AJAX response that needs to refresh this fragment
+  out-of-band; false only for the initial full-page render in
+  operator.html, where this fragment is rendered inline, not as a swap
+  of an existing element).
+#}
+{% set has_select_column = "Cancel" in permissions %}
+{% if has_select_column %}
+<div id="bulk-toolbar-operator" {% if oob %}hx-swap-oob="true"{% endif %}
+  class="flex justify-between items-center text-sm px-3.5 py-2 mb-2 bg-gray-50 border border-gray-200 rounded-md">
+  <span class="text-gray-600">{{ selected_ids | length }} selected</span>
+  <button type="button"
+    class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+    {% if not selected_ids %}disabled{% endif %}
+    hx-post="/ui/operator/bulk-cancel-form" hx-target="#dialog-container" hx-swap="innerHTML"
+    hx-vals='{"page": {{ page }}, "query_id": "{{ query_id }}"}'>Bulk Cancel</button>
+</div>
+{% endif %}

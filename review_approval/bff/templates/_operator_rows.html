@@ -1,0 +1,10 @@
+{#
+  Standalone wrapper around _operator_rows_body.html's <tbody> -- see
+  that file's comment for why the <table> wrapper is required (parsing
+  safety for a <tbody>/<tr> fragment returned outside any live table
+  context) and why hx-select="tbody" on the caller is what pulls the
+  inner <tbody> back out. Used as the direct response body for the
+  periodic 5s poll (POST /ui/operator/rows) and for the select-all
+  checkbox's own bulk-select response (see bff/ui.py).
+#}
+<table>{% include "_operator_rows_body.html" %}</table>

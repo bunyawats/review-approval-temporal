@@ -5,29 +5,80 @@
 > file (same convention as `docs/PAGINATION_PLAN.md`,
 > `docs/SESSION_STORE_PLAN.md`, `docs/BULK_ACTIONS_PLAN.md`).
 >
-> - [ ] Phase 1 — split `_operator_list.html`/`_manager_list.html` into
+> - [x] Phase 1 — split `_operator_list.html`/`_manager_list.html` into
 >       three independently-swappable fragments (header row, toolbar,
 >       tbody); move the 5s poll's `hx-trigger` off the whole `<table>`
 >       and onto just the tbody
-> - [ ] Phase 2 — `bff/ui.py`: new/adjusted route(s) so the periodic poll
+> - [x] Phase 2 — `bff/ui.py`: new/adjusted route(s) so the periodic poll
 >       returns only a tbody fragment, while a real page load/Prev/Next
 >       still render the full three-fragment table
-> - [ ] Phase 3 — select-all checkbox: declarative `hx-post`/`hx-vals`
+> - [x] Phase 3 — select-all checkbox: declarative `hx-post`/`hx-vals`
 >       (no custom JS) targeting the tbody fragment; drop the
 >       `all_selected` computation entirely (see "Decisions" below)
-> - [ ] Phase 4 — toolbar fragment gets a stable id; every bulk-select
+> - [x] Phase 4 — toolbar fragment gets a stable id; every bulk-select
 >       response (row-level and select-all) carries an OOB swap for it;
->       verify against the real htmx4 bundle that an OOB fragment is
->       still processed on a response whose *primary* target uses
->       `hx-swap="none"` before relying on it
-> - [ ] Phase 5 — tests + docs
+>       verified against the real htmx4 bundle (downloaded and
+>       disassembled, not just read about) that OOB fragments are built
+>       and dispatched as independent swap tasks with their own
+>       `swapSpec`, regardless of the triggering element's own primary
+>       `hx-swap` value — see "Decisions" below for what was actually
+>       found in the bundle
+> - [x] Phase 5 — tests + docs
 >
-> Not started. This document is the output of a design brainstorm run
-> entirely in conversation (no code changes) after two earlier, reverted
-> attempts to fix the select-all checkbox bug — see "History" below.
-> Read this whole file before touching `_operator_list.html`/
-> `_manager_list.html`/`_operator_row.html`/`_manager_row.html`/the
-> `bulk-select` routes in `bff/ui.py` again.
+> Implemented and verified server-side end to end against the real local
+> stack (92/92 tests pass, `pytest`) -- new templates
+> (`_operator_bulk_toolbar.html`, `_manager_bulk_toolbar.html`,
+> `_operator_rows.html`/`_operator_rows_body.html`,
+> `_manager_rows.html`/`_manager_rows_body.html`), new routes
+> (`POST /ui/{operator,manager}/rows` for the periodic poll), and
+> `bff/ui.py`'s `_toolbar_oob()` helper wired into every route that
+> could otherwise leave the toolbar fragment stale (Prev/Next,
+> `create_request()`, both `bulk-select` routes, both bulk-execute
+> routes via `_bulk_result_response()`).
+>
+> **Phase 6 (unplanned) — the actual root cause, found after user
+> testing in a real browser: `request_ids` was a JS array in every
+> `hx-vals`, and htmx4 silently mangles array values.** The three-region
+> redesign above (Phases 1-5) was real, necessary architecture (the
+> table genuinely needed to stop self-polling to make room for a stable
+> select-all checkbox), but it did **not** actually fix select-all's
+> broken *value* — the true bug, present since this feature's very
+> first version, was that `hx-vals`'s array value for `request_ids` gets
+> passed straight to `FormData.set(name, value)`, which (per spec)
+> stringifies a non-string/non-Blob value via `Array.prototype.
+> toString()` — comma-joining it into **one** field, not repeating the
+> field once per element. `bff/ui.py`'s routes were parsing
+> `list[str] = Form([])`, expecting repeated fields — so a multi-id
+> `request_ids` array (only ever sent by select-all) silently became one
+> garbage comma-joined "id" that never matched anything, while a
+> per-row checkbox's single-element array happened to produce the
+> correct value by accident (nothing to comma-join). This exactly
+> explains the symptoms reported after Phases 1-5 shipped: the selected
+> *count* changed (something real was being added to the selection set,
+> just the wrong thing), the bulk-action button's enabled state followed
+> that same wrong count, and no row checkbox ever actually became
+> checked. **Fix**: templates now build `request_ids` explicitly as a
+> string (`.join(",")` for select-all, a bare id for a per-row checkbox)
+> instead of an array; `bff/ui.py`'s two `bulk-select` routes now take
+> `request_ids: str = Form("")` and split on `,` (ids are UUIDs, never
+> containing a literal comma). Confirmed against the real pinned bundle
+> (`htmx.org@4.0.0-beta6`, disassembled): its `hx-vals` handling is
+> `n.set(e, t[e])`, never `n.append()`, with no array-aware
+> special-casing anywhere in that path.
+>
+> **Lesson for next time this kind of bug shows up**: when a
+> multi-select-style declarative htmx interaction "doesn't work" but a
+> single-select version of the same pattern does, suspect the *wire
+> format* (does the array survive request serialization intact?) before
+> suspecting DOM structure/swap targeting — this cost two prior fix
+> attempts and a full architectural redesign before the real cause
+> surfaced, entirely because concrete user-reported browser symptoms
+> (not more server-side reasoning) were what finally pointed at it.
+> **Still not independently confirmed by a direct visual click-test** —
+> the Chrome extension remained unavailable for this entire
+> investigation; the fix follows directly from the real bundle's own
+> source and from the user's reported symptoms matching it exactly, but
+> hasn't been eyeballed working end to end in an actual browser.
 
 ## History (don't repeat these)
 
@@ -110,33 +161,65 @@ value in the same request).
   pick up the new selection state.
 - **The toolbar's OOB update rides along in every bulk-select response**,
   select-all or per-row, so "N selected" and the bulk-action button's
-  enabled state are correct immediately after *any* checkbox interaction
-  — this needs verifying against the real htmx4 bundle (per Phase 4
-  above) that an out-of-band fragment is still processed when the
-  triggering element's own primary `hx-swap` is `"none"` (the per-row
-  checkbox case); expected to work since OOB processing is documented as
-  an independent step from the primary swap, but not yet confirmed here.
+  enabled state are correct immediately after *any* checkbox interaction.
+  **Confirmed against the real pinned bundle** (`htmx.org@4.0.0-beta6`,
+  downloaded and disassembled, not just read about): OOB elements are
+  collected by a dedicated handler that builds them as independent
+  `{type: "oob", target, swapSpec, ...}` tasks — `swapSpec` parsed from
+  each element's own `hx-swap-oob` attribute value (defaulting to
+  `outerHTML` for `hx-swap-oob="true"`), never inherited from whatever
+  the *main* task's swap style is. The `if (style === "none") return;`
+  early-out that makes `hx-swap="none"` a no-op only short-circuits the
+  one task whose own `swapSpec.style` is `"none"` — an OOB task's style
+  comes from its own attribute, so a per-row checkbox's `hx-swap="none"`
+  on its *main* target has no effect on a same-response OOB fragment's
+  own swap.
 
-## Open questions / not yet decided
+## How it was actually built (resolving the open questions below)
 
-- Exact route shape for `bulk-select`: does it stay one shared route for
-  both per-row and select-all clicks (matching the original Phase 3
-  "one route serves both cases without branching on which checkbox
-  triggered it" philosophy), returning a tbody fragment (used as the
-  primary swap target only by select-all, ignored by per-row's
-  `hx-swap="none"`) plus an always-present toolbar OOB fragment? This
-  seems like the natural continuation of the existing design but hasn't
-  been explicitly confirmed.
-- Exact mechanics for returning *only* a tbody fragment from the poll
-  route without hitting the `<tr>`/`<td>`-outside-table-context tag
-  stripping gotcha already documented in the `htmx4` skill and in
-  `CLAUDE.md`'s `_operator_row.html`/`_manager_row.html` bullet (the
-  existing single-row-response templates already solve this with a
-  `<table><tbody>...</tbody></table>` wrapper + `select: 'tbody'`/`'tr'`
-  — the poll's full-tbody response likely needs the same treatment).
-- Whether clicking select-all while some (but not all) rows are already
-  individually checked is additive (union with existing selection) or a
-  full reset — not yet discussed.
-- What a toolbar stable id / tbody stable id should be named, and whether
-  the toolbar fragment needs its own `{% macro %}` like
-  `_operator_row.html`/`_manager_row.html` already do for rows.
+- **`bulk-select` stayed one shared route** for both per-row and
+  select-all clicks, exactly as originally guessed. It always renders
+  and returns two fragments: `_{role}_rows.html` (the current page's
+  rows, `<table>`-wrapped) — meaningfully used as the primary swap
+  target only by the select-all checkbox's own request
+  (`hx-target="#request-rows" hx-select="tbody" hx-swap="outerHTML"`),
+  ignored by a per-row checkbox's `hx-swap="none"` — plus
+  `_{role}_bulk_toolbar.html` rendered with `oob=True`, always used.
+  Both take `page`/`query_id` as `Form` params (default `0`/`""`), now
+  sent by *every* checkbox (per-row included — see below), not just
+  select-all.
+- **Tag-stripping avoided the same way the single-row-response templates
+  already do it**: `_operator_rows_body.html`/`_manager_rows_body.html`
+  hold the actual `<tbody id="request-rows">...</tbody>` (with its own
+  polling `hx-*` attributes baked in), included both directly inside the
+  live `<table>` in `_operator_list.html`/`_manager_list.html` (full
+  render) and wrapped in a bare `<table>...</table>` by
+  `_operator_rows.html`/`_manager_rows.html` (the standalone poll/
+  bulk-select response). `hx-select="tbody"` on every request targeting
+  `#request-rows` directly (the self-poll, and the select-all checkbox)
+  pulls the inner `<tbody>` back out before the swap.
+- **Select-all is additive/replace-exact, not merge-toggle**: checking it
+  sends *all* of the page's selectable ids with `checked: true`
+  (`sel.update(request_ids)` — a set union with whatever was already
+  selected, including rows on other pages); unchecking it sends the same
+  ids with `checked: false` (`sel.difference_update` — removes exactly
+  those ids, leaving other pages' selections alone). It does not first
+  clear the whole selection.
+- **Toolbar stable ids**: `#bulk-toolbar-operator` / `#bulk-toolbar-manager`.
+  **Tbody stable id**: `#request-rows`, shared by both roles (never both
+  present in the DOM at once, since a session is either the operator or
+  manager screen). The toolbar got its own small dedicated template per
+  role (`_operator_bulk_toolbar.html`/`_manager_bulk_toolbar.html`) —
+  plain templates, not `{% macro %}`s, since each is only ever rendered
+  as a whole fragment (inline or OOB), never called multiple times
+  per-row the way `_operator_row.html`'s macro is.
+- **Every route whose response could leave the toolbar's baked-in
+  `page`/`query_id` or selected-count stale now explicitly refreshes it**
+  via `bff/ui.py`'s `_toolbar_oob()` helper: Prev/Next
+  (`operator_list()`/`manager_list()`), `create_request()` (view resets
+  to page 0), both `bulk-select` routes, and both bulk-execute routes
+  (via `_bulk_result_response()`, which now takes a `role: str` instead
+  of a literal template name so it can render the matching toolbar too).
+  The one route that does **not** touch the toolbar is the periodic poll
+  (`operator_rows()`/`manager_rows()`) — polling alone never changes
+  selection, so there's nothing for the toolbar to reflect.

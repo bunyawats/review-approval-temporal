@@ -1,73 +1,52 @@
-{% import "_manager_row.html" as row_macros %}
 {% set selected_ids = selected_ids | default([]) %}
 {#
-  Bulk-approve/reject selection column/toolbar exist whenever either
-  decision permission is granted -- see _manager_row.html's matching
-  comment and docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI".
-  selectable_ids is this page's PENDING_REVIEW ids (the only ones a
-  checkbox actually renders for).
+  The bulk-approve/reject toolbar used to live inside this table's
+  <thead> so the table's own 5s self-poll kept it current for free.
+  It's been pulled out into its own fragment
+  (_manager_bulk_toolbar.html) -- see docs/SELECT_ALL_CHECKBOX_PLAN.md
+  -- specifically so the periodic poll can be scoped to just the
+  <tbody> without also having to rebuild the header row's select-all
+  checkbox every cycle. Every route that renders this template as an
+  AJAX response (not the initial full page load, which includes the
+  toolbar separately in manager.html) is responsible for also sending
+  an OOB-rendered copy of that toolbar fragment alongside this table --
+  see bff/ui.py's _toolbar_oob() helper and its call sites.
+
+  Selection column exists whenever either decision permission is
+  granted -- see _manager_row.html's matching comment. selectable_ids
+  is this page's PENDING_REVIEW ids, the set the select-all checkbox
+  acts on. The checkbox itself is a stateless action trigger, not a
+  status indicator (see docs/SELECT_ALL_CHECKBOX_PLAN.md's
+  "Decisions") -- there is deliberately no "are all of these already
+  selected" check here; it always renders unchecked.
 #}
 {% set has_select_column = "Approve" in permissions or "Reject" in permissions %}
 {% set selectable_ids = paged.items | selectattr("status", "equalto", "PENDING_REVIEW") | map(attribute="id") | list %}
-{% set all_selected = has_select_column and selectable_ids | length > 0 and (selectable_ids | select("in", selected_ids) | list | length == selectable_ids | length) %}
 {% set num_columns = 6 + (1 if has_select_column else 0) %}
-{#
-  Unlike the operator list, this poll sends no requester filter (manager
-  visibility is unrestricted), so it round-trips query_id to actually
-  benefit from the count cache -- see bff/ui.py's manager_list() and
-  docs/PAGINATION_PLAN.md's BFF note. hx-vals bakes in *this render's*
-  page/query_id as literals; every subsequent render (self-poll tick, or
-  a Prev/Next click below) fully replaces this <table> via outerHTML,
-  including its own hx-vals, so the next poll always resends whatever
-  page the user is actually looking at.
-#}
 <table id="request-list"
   {% if oob %}hx-swap-oob="true"{% endif %}
-  hx-post="/ui/manager/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
-  hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
-    {% if has_select_column %}
-    {#
-      Same "lives inside the outerHTML-replaced <table>, so it's always
-      current with zero extra plumbing" reasoning as the operator list's
-      toolbar. Approve/Reject are separately permissioned, so both
-      buttons are independently gated -- a future role with only one of
-      the two is a real possibility, same as the single-item Approve/
-      Reject buttons in _detail_dialog.html.
-    #}
-    <tr>
-      <td colspan="{{ num_columns }}" class="px-3.5 py-2 border-b border-gray-200 bg-gray-50">
-        <div class="flex justify-between items-center text-sm">
-          <span class="text-gray-600">{{ selected_ids | length }} selected</span>
-          <div class="flex gap-2">
-            {% if "Reject" in permissions %}
-            <button type="button"
-              class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              {% if not selected_ids %}disabled{% endif %}
-              hx-post="/ui/manager/bulk-decision-form"
-              hx-vals='{"decision": "REJECTED", "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
-              hx-target="#dialog-container" hx-swap="innerHTML">Bulk Reject</button>
-            {% endif %}
-            {% if "Approve" in permissions %}
-            <button type="button"
-              class="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              {% if not selected_ids %}disabled{% endif %}
-              hx-post="/ui/manager/bulk-decision-form"
-              hx-vals='{"decision": "APPROVED", "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
-              hx-target="#dialog-container" hx-swap="innerHTML">Bulk Approve</button>
-            {% endif %}
-          </div>
-        </div>
-      </td>
-    </tr>
-    {% endif %}
     <tr>
       {% if has_select_column %}
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">
-        <input type="checkbox" {% if all_selected %}checked{% endif %}
-          hx-post="/ui/manager/bulk-select" hx-swap="none"
-          hx-vals='js:{"request_ids": {{ selectable_ids | tojson }}, "checked": event.target.checked}'>
+        {#
+          Declarative, not onclick/htmx.ajax() -- safe to be declarative
+          again now that the target (#request-rows) is a *sibling* of
+          this checkbox, not an ancestor containing it (see
+          docs/SELECT_ALL_CHECKBOX_PLAN.md's "History"). hx-select=
+          "tbody" pulls the <tbody> back out of the <table>-wrapped
+          response -- see _manager_rows_body.html's comment.
+
+          request_ids is explicitly .join(",")'d into a single string,
+          not sent as a JS array -- see _operator_list.html's matching
+          comment for the confirmed htmx4 FormData.set() coercion
+          behavior this works around (and which is what actually broke
+          select-all's *value* from this feature's very first version).
+        #}
+        <input type="checkbox"
+          hx-post="/ui/manager/bulk-select" hx-target="#request-rows" hx-select="tbody" hx-swap="outerHTML"
+          hx-vals='js:{"request_ids": {{ selectable_ids | tojson }}.join(","), "checked": event.target.checked, "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'>
       </th>
       {% endif %}
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">Type</th>
@@ -78,13 +57,7 @@
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50"></th>
     </tr>
   </thead>
-  <tbody>
-    {% for r in paged.items %}
-    {{ row_macros.manager_row(r, permissions, selected_ids) }}
-    {% else %}
-    <tr><td colspan="{{ num_columns }}" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
-    {% endfor %}
-  </tbody>
+  {% include "_manager_rows_body.html" %}
   <tfoot>
     <tr>
       <td colspan="{{ num_columns }}" class="px-3.5 py-2.5 border-t border-gray-200 bg-gray-50">

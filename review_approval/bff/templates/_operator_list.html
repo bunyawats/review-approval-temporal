@@ -1,62 +1,69 @@
-{% import "_operator_row.html" as row_macros %}
 {% if clear_dialog %}<div id="dialog-container" hx-swap-oob="true"></div>{% endif %}
 {% set selected_ids = selected_ids | default([]) %}
 {#
-  Bulk-cancel selection column/toolbar exist whenever Cancel is granted --
-  see _operator_row.html's matching comment and
-  docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI". selectable_ids is this
-  page's PENDING_REVIEW ids (the only ones a checkbox actually renders
-  for) -- used both for "select all on this page" and the toolbar's count.
+  The bulk-cancel toolbar (count + Bulk Cancel button) used to live
+  inside this table's <thead> so the table's own 5s self-poll kept it
+  current for free. It's been pulled out into its own fragment
+  (_operator_bulk_toolbar.html) -- see docs/SELECT_ALL_CHECKBOX_PLAN.md
+  -- specifically so the periodic poll can be scoped to just the
+  <tbody> (see _operator_rows_body.html) without also having to rebuild
+  the header row's select-all checkbox every cycle. Every route that
+  renders this template as an AJAX response (not the initial full page
+  load, which includes the toolbar separately in operator.html) is
+  responsible for also sending an OOB-rendered copy of that toolbar
+  fragment alongside this table -- see bff/ui.py's _toolbar_oob()
+  helper and its call sites.
+
+  Selection column exists on the page at all whenever Cancel is granted
+  -- see _operator_row.html's matching comment. selectable_ids is this
+  page's PENDING_REVIEW ids, the set the select-all checkbox acts on.
+  The checkbox itself is a stateless action trigger, not a status
+  indicator (see docs/SELECT_ALL_CHECKBOX_PLAN.md's "Decisions") --
+  there is deliberately no "are all of these already selected" check
+  here; it always renders unchecked.
 #}
 {% set has_select_column = "Cancel" in permissions %}
 {% set selectable_ids = paged.items | selectattr("status", "equalto", "PENDING_REVIEW") | map(attribute="id") | list %}
-{% set all_selected = has_select_column and selectable_ids | length > 0 and (selectable_ids | select("in", selected_ids) | list | length == selectable_ids | length) %}
 {% set num_columns = 5 + (1 if has_select_column else 0) %}
-{#
-  Paging/polling round-trips query_id and never resends filter -- the
-  server resolves (filter, total) from the cache, re-checking that the
-  cached filter's requester still matches this session before trusting
-  it (see bff/ui.py's operator_list()). hx-vals bakes in *this render's*
-  page/query_id as literals -- no client-side JS/dataset reads needed,
-  since every subsequent render (self-poll tick, or a Prev/Next click
-  below) fully replaces this <table> via outerHTML, including its own
-  hx-vals, so the next poll always resends whatever page the user is
-  actually looking at.
-#}
 <table id="request-list"
   {% if oob %}hx-swap-oob="true"{% endif %}
-  hx-post="/ui/operator/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
-  hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
-    {% if has_select_column %}
-    {#
-      Because this toolbar lives inside the same <table> the 5s self-poll
-      replaces wholesale (outerHTML), "N selected" and the Bulk Cancel
-      button always reflect the current selection with zero extra
-      plumbing -- no OOB swap, no separate count endpoint, just
-      len(selected_ids) computed server-side at render time like
-      everything else here.
-    #}
-    <tr>
-      <td colspan="{{ num_columns }}" class="px-3.5 py-2 border-b border-gray-200 bg-gray-50">
-        <div class="flex justify-between items-center text-sm">
-          <span class="text-gray-600">{{ selected_ids | length }} selected</span>
-          <button type="button"
-            class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            {% if not selected_ids %}disabled{% endif %}
-            hx-post="/ui/operator/bulk-cancel-form" hx-target="#dialog-container" hx-swap="innerHTML"
-            hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'>Bulk Cancel</button>
-        </div>
-      </td>
-    </tr>
-    {% endif %}
     <tr>
       {% if has_select_column %}
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">
-        <input type="checkbox" {% if all_selected %}checked{% endif %}
-          hx-post="/ui/operator/bulk-select" hx-swap="none"
-          hx-vals='js:{"request_ids": {{ selectable_ids | tojson }}, "checked": event.target.checked}'>
+        {#
+          Declarative, not onclick/htmx.ajax() -- safe to be declarative
+          again now that the target (#request-rows) is a *sibling* of
+          this checkbox, not an ancestor containing it (see
+          docs/SELECT_ALL_CHECKBOX_PLAN.md's "History" for why that
+          distinction mattered). hx-select="tbody" pulls the <tbody>
+          back out of the <table>-wrapped response -- see
+          _operator_rows_body.html's comment.
+
+          request_ids is explicitly .join(",")'d into a single string
+          here, not sent as a JS array -- htmx's hx-vals passes an array
+          value straight to FormData.set(name, value), which (per the
+          FormData/URLSearchParams spec) stringifies it via
+          Array.prototype.toString() -- i.e. comma-joined into ONE
+          field -- rather than appending one field per element.
+          Confirmed against the real pinned htmx4 bundle
+          (htmx.org@4.0.0-beta6). A per-row checkbox's single-element
+          array happened to "work" by accident (no comma to join) --
+          this mismatch between what htmx actually sends and what
+          bff/ui.py's bulk-select routes used to parse
+          (`list[str] = Form([])`, expecting repeated fields) is what
+          broke the select-all checkbox's *value* from the very first
+          version of this feature; the self-swap-of-ancestor theory the
+          redesign above was built around was a red herring. Explicitly
+          joining here (rather than relying on the implicit coercion
+          Array.toString() happens to also produce) makes the wire
+          format obvious on both ends instead of depending on a subtle
+          spec-level accident.
+        #}
+        <input type="checkbox"
+          hx-post="/ui/operator/bulk-select" hx-target="#request-rows" hx-select="tbody" hx-swap="outerHTML"
+          hx-vals='js:{"request_ids": {{ selectable_ids | tojson }}.join(","), "checked": event.target.checked, "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'>
       </th>
       {% endif %}
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">Type</th>
@@ -66,13 +73,7 @@
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50"></th>
     </tr>
   </thead>
-  <tbody>
-    {% for r in paged.items %}
-    {{ row_macros.operator_row(r, permissions, selected_ids) }}
-    {% else %}
-    <tr><td colspan="{{ num_columns }}" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
-    {% endfor %}
-  </tbody>
+  {% include "_operator_rows_body.html" %}
   <tfoot>
     <tr>
       <td colspan="{{ num_columns }}" class="px-3.5 py-2.5 border-t border-gray-200 bg-gray-50">

@@ -1,4 +1,4 @@
-{% macro operator_row(r, permissions=[], selected_ids=[]) %}
+{% macro operator_row(r, permissions=[], selected_ids=[], page=0, query_id="") %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",
@@ -29,10 +29,23 @@
   {% if has_select_column %}
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
     {% if can_select %}
+    {#
+      request_ids is sent as a single comma-joined *string*, not a JS
+      array -- htmx's hx-vals sends an array value through
+      FormData.set(name, value), which (per the FormData/URLSearchParams
+      spec) stringifies any non-string/non-Blob value via
+      Array.prototype.toString() -- i.e. comma-joined into ONE field --
+      rather than appending one field per element. Confirmed against the
+      real pinned htmx4 bundle (htmx.org@4.0.0-beta6): its hx-vals
+      handling does `n.set(e, t[e])`, never `n.append()`, with no
+      array-aware special-casing. bff/ui.py's bulk-select routes parse
+      this same comma-joined string back into a list. Ids are UUIDs and
+      never contain a literal comma, so this is unambiguous.
+    #}
     <input type="checkbox" name="request_ids" value="{{ r.id }}"
       {% if r.id in selected_ids %}checked{% endif %}
       hx-post="/ui/operator/bulk-select" hx-swap="none"
-      hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked": event.target.checked}'>
+      hx-vals='js:{"request_ids": "{{ r.id }}", "checked": event.target.checked, "page": {{ page }}, "query_id": "{{ query_id }}"}'>
     {% endif %}
   </td>
   {% endif %}

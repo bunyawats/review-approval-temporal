@@ -1,0 +1,31 @@
+{#
+  Manager counterpart of _operator_bulk_toolbar.html -- see that file's
+  comment for why this is a <div>, not a <tr>, and what `oob` means.
+  Approve/Reject are independently gated, same reasoning as
+  _detail_dialog.html's per-decision permission check.
+#}
+{% set has_select_column = "Approve" in permissions or "Reject" in permissions %}
+{% if has_select_column %}
+<div id="bulk-toolbar-manager" {% if oob %}hx-swap-oob="true"{% endif %}
+  class="flex justify-between items-center text-sm px-3.5 py-2 mb-2 bg-gray-50 border border-gray-200 rounded-md">
+  <span class="text-gray-600">{{ selected_ids | length }} selected</span>
+  <div class="flex gap-2">
+    {% if "Reject" in permissions %}
+    <button type="button"
+      class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+      {% if not selected_ids %}disabled{% endif %}
+      hx-post="/ui/manager/bulk-decision-form"
+      hx-vals='{"decision": "REJECTED", "page": {{ page }}, "query_id": "{{ query_id }}"}'
+      hx-target="#dialog-container" hx-swap="innerHTML">Bulk Reject</button>
+    {% endif %}
+    {% if "Approve" in permissions %}
+    <button type="button"
+      class="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+      {% if not selected_ids %}disabled{% endif %}
+      hx-post="/ui/manager/bulk-decision-form"
+      hx-vals='{"decision": "APPROVED", "page": {{ page }}, "query_id": "{{ query_id }}"}'
+      hx-target="#dialog-container" hx-swap="innerHTML">Bulk Approve</button>
+    {% endif %}
+  </div>
+</div>
+{% endif %}

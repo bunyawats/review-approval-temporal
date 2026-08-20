@@ -391,21 +391,53 @@ or `bff/` respectively; don't put front-door-specific logic in
   username-keyed store (`_get_selection()`/`_clear_selection()`) — same
   "correct without a shared cache, a replica miss just shows unchecked,
   never wrong data" reasoning as `service.py`'s `_query_cache`.
-  `POST /ui/{operator,manager}/bulk-select` (`request_ids`, `checked`)
-  is gated by `require_session_role(...)` only, **not**
-  `require_permission("Cancel")`/etc. — marking a row "selected" has no
-  side effect beyond what's rendered back to this same user, so it
-  doesn't need the heavier permission check; the real enforcement stays
-  at `cancel_review()`/`submit_decision()`, invoked from the execute
-  routes below. Selection clears on a fresh `GET /ui/operator`/
+  `POST /ui/{operator,manager}/bulk-select` (`request_ids`, `checked`,
+  `page`, `query_id`) is gated by `require_session_role(...)` only,
+  **not** `require_permission("Cancel")`/etc. — marking a row "selected"
+  has no side effect beyond what's rendered back to this same user, so
+  it doesn't need the heavier permission check; the real enforcement
+  stays at `cancel_review()`/`submit_decision()`, invoked from the
+  execute routes below. Selection clears on a fresh `GET /ui/operator`/
   `/ui/manager` (a real navigation/reload) and after a confirmed bulk
-  action, but **not** on the 5s poll route (`operator_list()`/
-  `manager_list()`) — those only read current selection to render
-  `checked` state. `_resolve_operator_page()`/`_resolve_manager_page()`
-  factor out the page/query_id resolution logic `operator_list()`/
-  `manager_list()` already had, since the bulk execute routes below need
-  the identical logic to re-render the same list page after clearing
-  selection.
+  action, but **not** on the periodic poll (`operator_rows()`/
+  `manager_rows()` — see the select-all bullet just below for why
+  polling is a separate route from `operator_list()`/`manager_list()`
+  now) — polling only reads current selection to render `checked`
+  state, it never mutates it. `_resolve_operator_page()`/
+  `_resolve_manager_page()` factor out the page/query_id resolution
+  logic `operator_list()`/`manager_list()` already had, reused by the
+  poll routes, both `bulk-select` routes, and the bulk execute routes
+  below — every one of these needs to re-render the same list page a
+  user was already on.
+  **Select-all checkbox + three-region table split
+  (`docs/SELECT_ALL_CHECKBOX_PLAN.md`)**: `_operator_list.html`/
+  `_manager_list.html`'s `<table id="request-list">` no longer polls
+  itself — the periodic 5s self-poll lives on `<tbody id=
+  "request-rows">` alone (see `_operator_rows_body.html`/
+  `_manager_rows_body.html`), hitting a **new** `POST /ui/{operator,
+  manager}/rows` route (`operator_rows()`/`manager_rows()`) that returns
+  only a `<table>`-wrapped tbody fragment (same tag-stripping-avoidance
+  pattern as the single-row-response templates — see the
+  `_operator_row.html` bullet above — plus `hx-select="tbody"` on every
+  request targeting `#request-rows` directly to pull the inner `<tbody>`
+  back out). This is what keeps the header row's select-all checkbox
+  from being destroyed and rebuilt every poll cycle. The bulk-cancel/
+  bulk-approve/bulk-reject **toolbar** (count + button(s)) was pulled out
+  of `<thead>` into its own standalone fragment
+  (`_operator_bulk_toolbar.html`/`_manager_bulk_toolbar.html`, a `<div>`
+  not a `<tr>` — sidesteps the same tag-stripping issue without needing
+  a `<table>` wrapper at all) rendered inline (non-OOB) only by the
+  initial full-page load (`operator.html`/`manager.html`); every other
+  route that touches the list calls `_toolbar_oob()` and appends its
+  result, so the toolbar's selected-count and baked-in `page`/`query_id`
+  never go stale. `operator_bulk_select()`/`manager_bulk_select()` now
+  always render and return **two** fragments — the current page's rows
+  (`_operator_rows.html`, meaningfully used as the primary swap target
+  only by the select-all checkbox's own request; a per-row checkbox
+  ignores it via its unchanged `hx-swap="none"`) plus the toolbar OOB
+  update (used by both) — one route still serving both cases without
+  branching on which checkbox triggered it, per the original Phase 3
+  design.
   **Confirm dialog + execute (Phase 4)**: `POST
   /ui/operator/bulk-cancel-form` → `POST /ui/operator/bulk-cancel`, and
   `POST /ui/manager/bulk-decision-form` → `POST /ui/manager/bulk-
@@ -429,16 +461,21 @@ or `bff/` respectively; don't put front-door-specific logic in
   `_RETARGET_DIALOG_HEADERS`, same pattern as every other dialog's error
   path — not a raw 400.
   `_bulk_result_response()` assembles a bulk execute route's response
-  from **two independently-rendered templates concatenated into one
+  from **three independently-rendered templates concatenated into one
   body** (`templates.get_template(name).render(...)`, not
   `TemplateResponse`): `_bulk_result_dialog.html` (swapped into
-  `#dialog-container`) plus the caller's list template re-rendered with
+  `#dialog-container`), the caller's list template re-rendered with
   `oob=True` (adds `hx-swap-oob="true"` to `<table id="request-list">`,
   parameterizing `_operator_list.html`/`_manager_list.html` the same way
   `clear_dialog` already does) — this is what makes the just-cancelled/
   decided rows' new statuses show up immediately without waiting for the
   next 5s poll tick, including for selected rows that weren't on the
-  currently-displayed page.
+  currently-displayed page — and, since the select-all redesign, a
+  `_toolbar_oob()` call (see the bullet above) so the toolbar reflects
+  "0 selected" once the caller has cleared selection. Takes `role: str`
+  (`"operator"`/`"manager"`) rather than a literal template name, since
+  it now needs that to derive both the list template *and* the toolbar
+  template.
 - **`bff/templates/`** — Jinja2 templates. `base.html` is the shell;
   `_*.html` are HTMX fragments, not full pages. This project's Starlette
   version requires **`TemplateResponse(request, name, context)`**
@@ -502,10 +539,15 @@ or `bff/` respectively; don't put front-door-specific logic in
   full mechanism). `select: 'tr'` on every caller's `htmx.ajax()` (see
   `bff/ui.py` above) is what pulls the correctly-parsed `<tr>` back out
   of that wrapper for the actual swap.
-  **Bulk-selection checkbox column**: both macros take a
-  `selected_ids: set[str] = set()` param (same default-empty pattern as
-  `permissions=[]`). The column exists on the page at all whenever the
-  relevant permission is granted (`has_select_column` — `"Cancel" in
+  **Bulk-selection checkbox column**: both macros take
+  `selected_ids: set[str] = set()` and `page: int = 0, query_id: str =
+  ""` params (same default pattern as `permissions=[]`) — `page`/
+  `query_id` are baked into every checkbox's own `hx-vals` (not just
+  select-all's) since the shared `bulk-select` route needs them to
+  re-render the toolbar fragment correctly regardless of which checkbox
+  triggered it (see the `docs/SELECT_ALL_CHECKBOX_PLAN.md` bullet
+  below). The column exists on the page at all whenever the relevant
+  permission is granted (`has_select_column` — `"Cancel" in
   permissions` for operator, `"Approve" in permissions or "Reject" in
   permissions` for manager); within that column, a checkbox only renders
   for rows actually eligible for a bulk action (`can_select = r.status
@@ -516,24 +558,41 @@ or `bff/` respectively; don't put front-door-specific logic in
   checkbox POSTs to `/ui/{operator,manager}/bulk-select` with `hx-swap=
   "none"` (its own checked/unchecked state is already correct the
   instant it's clicked; the POST just persists that fact server-side)
-  and `hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked":
-  event.target.checked}'` — the `js:` prefix (htmx4) is required, not
-  optional: native form-encoding only includes a checkbox's value when
-  *checked*, so an unchecking click would otherwise send no
-  `request_ids` at all.
-  **Known bug, not yet fixed — redesign planned, not started:**
-  `docs/SELECT_ALL_CHECKBOX_PLAN.md` has the full design (worked out via
-  a conversation brainstorm, no code changes yet) for the "select all on
-  this page" header checkbox, which does not currently work — clicking
-  it neither updates its own visible state nor any row checkbox's. Two
-  earlier fix attempts (documented in that file's "History" section)
-  were tried and reverted; the planned redesign sidesteps rather than
-  resolves their shared root cause by splitting this table into three
-  independently-swappable regions (header row / toolbar fragment /
-  tbody) so the select-all checkbox's target is never its own ancestor.
-  Read that file before touching `_operator_list.html`/
-  `_manager_list.html`/`_operator_row.html`/`_manager_row.html`/the
-  `bulk-select` routes in `bff/ui.py` again.
+  and `hx-vals='js:{"request_ids": "{{ r.id }}", "checked":
+  event.target.checked, "page": ..., "query_id": "..."}'` — the `js:`
+  prefix (htmx4) is required, not optional: native form-encoding only
+  includes a checkbox's value when *checked*, so an unchecking click
+  would otherwise send no `request_ids` at all.
+  **`request_ids` is always a plain string here, never a JS array** —
+  a bare id for a per-row checkbox, `[...].join(",")` for select-all
+  (see the bullet just below). `hx-vals` passes an array value straight
+  to `FormData.set(name, value)`, which (per spec) stringifies it via
+  `Array.prototype.toString()` into one comma-joined field rather than
+  repeating the field per element — confirmed against the real pinned
+  htmx4 bundle (`htmx.org@4.0.0-beta6`, disassembled), not assumed. Both
+  `bulk-select` routes in `bff/ui.py` take `request_ids: str = Form("")`
+  and split on `,` accordingly (ids are UUIDs, never containing a
+  literal comma) — do **not** revert this to `list[str] = Form([])`,
+  which is what silently broke select-all's *value* from this feature's
+  very first version (a per-row checkbox's single-element array
+  happened to produce the right value by accident, masking the bug for
+  months of "it mostly works").
+  **The "select all on this page" header checkbox lives in
+  `_operator_list.html`/`_manager_list.html`, not this file** —
+  see `docs/SELECT_ALL_CHECKBOX_PLAN.md` for its full design and, in its
+  status tracker's "Phase 6", the actual root-cause story above in more
+  detail. The checkbox itself is a stateless action trigger (never
+  renders `checked`, no "are all of these already selected"
+  computation), targets `#request-rows` (a *sibling*, not this table's
+  own ancestor) via the same declarative `hx-post`/`hx-vals` idiom as a
+  per-row checkbox, and its own click immediately refreshes the affected
+  rows rather than waiting for the next poll tick. Read that file before
+  touching `_operator_list.html`/`_manager_list.html`/this file/the
+  `bulk-select` routes in `bff/ui.py` again — the three-region table
+  split it documents was real, necessary architecture, but on its own
+  did not fix select-all (the `request_ids` wire-format bug above did);
+  two earlier, even simpler fix attempts were also tried and reverted
+  before any of this, and that file's "History" section covers those.
 - **`bff/templates/_bulk_confirm_dialog.html`, `_bulk_result_dialog.html`**
   — the bulk-action counterparts of `_form_dialog.html`/
   `_cancel_dialog.html`/`_detail_dialog.html`. One shared confirm-dialog
@@ -887,18 +946,22 @@ selected item before executing; the non-obvious part is that
 set[request_id]]` in `bff/ui.py`, same "correct without a shared cache,
 a replica miss just shows unchecked" reasoning as `service.py`'s
 `_query_cache`), not in the browser — every row render bakes the
-correct `checked` state in directly, which is what lets the table's
-existing 5-second self-poll (`outerHTML`-replacing `<table
-id="request-list">`) coexist with checkboxes at all, with zero custom
-selection-tracking JS. Selection clears on a fresh page load and after a
-confirmed bulk action; see `bff/ui.py`'s bullet above for the full
-mechanism (including why `hx-vals`'s `js:` prefix is required on each
-checkbox, not optional, and why the dialog-open routes ended up `POST`
-rather than the `GET` the plan doc originally sketched). Read
-`docs/BULK_ACTIONS_PLAN.md`'s status-tracker note before touching
-`workflow/service.py`'s cancel/decision functions or either front
-door's row/list templates — it records the handful of places the actual
-implementation diverged from the plan's original sketch.
+correct `checked` state in directly, with zero custom selection-tracking
+JS. Selection clears on a fresh page load and after a confirmed bulk
+action; see `bff/ui.py`'s bullet above for the full mechanism (including
+why `hx-vals`'s `js:` prefix is required on each checkbox, not optional,
+and why the dialog-open routes ended up `POST` rather than the `GET` the
+plan doc originally sketched). Read `docs/BULK_ACTIONS_PLAN.md`'s
+status-tracker note before touching `workflow/service.py`'s cancel/
+decision functions or either front door's row/list templates — it
+records the handful of places the actual implementation diverged from
+the plan's original sketch.
+**The table itself no longer self-polls** — `docs/SELECT_ALL_CHECKBOX_PLAN.md`
+split it into three independently-refreshed regions (header row / a
+separate toolbar fragment / `<tbody>`) so a "select all on this page"
+checkbox could be added without the periodic poll destroying and
+rebuilding it every 5 seconds; see that file and the `bff/ui.py`/
+`_operator_row.html` bullets above for the mechanism.
 
 ## Known gaps
 

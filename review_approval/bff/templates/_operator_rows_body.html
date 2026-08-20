@@ -1,0 +1,32 @@
+{#
+  The actual data rows, factored out so the exact same markup (including
+  its own polling attributes) can be embedded two ways: directly inside
+  _operator_list.html's live <table> (used by a full page/Prev-Next
+  render), and wrapped in a standalone <table> by _operator_rows.html
+  (used as the periodic 5s poll's own response body -- see
+  docs/SELECT_ALL_CHECKBOX_PLAN.md). Splitting the poll's hx-trigger off
+  onto just this <tbody>, instead of the whole table, is what keeps the
+  header row's select-all checkbox from being destroyed and rebuilt
+  every 5 seconds regardless of whether the user is mid-interaction
+  with it.
+
+  hx-select="tbody" is required on every request that targets this
+  element directly (this poll, and the select-all checkbox's own click)
+  -- the response comes back wrapped in <table>...</table> for parsing
+  safety (a bare <tbody>/<tr> outside table context gets silently
+  stripped by the browser's HTML parser, same as the row-swap gotcha
+  _operator_row_response.html already works around), and hx-select pulls
+  just the inner <tbody> back out before the actual outerHTML swap.
+#}
+{% import "_operator_row.html" as row_macros %}
+{% set num_columns = 5 + (1 if "Cancel" in permissions else 0) %}
+<tbody id="request-rows"
+  hx-post="/ui/operator/rows" hx-trigger="every 5s [!document.querySelector('.htmx-request')]"
+  hx-select="tbody" hx-swap="outerHTML"
+  hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'>
+  {% for r in paged.items %}
+  {{ row_macros.operator_row(r, permissions, selected_ids, paged.page, paged.query_id) }}
+  {% else %}
+  <tr><td colspan="{{ num_columns }}" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
+  {% endfor %}
+</tbody>

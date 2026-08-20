@@ -78,12 +78,30 @@ def _create_as(client: TestClient, vendor: str = "test", review_type: str = "pur
     return match.group(1)
 
 
-def _select(client: TestClient, role: str, request_ids: list[str], checked: bool = True) -> None:
+def _select(client: TestClient, role: str, request_ids: list[str], checked: bool = True) -> httpx.Response:
+    # A single comma-joined string, not a repeated `request_ids=a&
+    # request_ids=b` field per id -- matching what a real browser's htmx
+    # actually sends via hx-vals (see bff/ui.py's operator_bulk_select()
+    # comment for the confirmed FormData.set() coercion behind this).
+    # httpx's own list-value encoding (data={"request_ids": [...]})
+    # produces the repeated-field shape instead, which does NOT match
+    # the real wire format and would silently test the wrong thing.
     response = client.post(
         f"/ui/{role}/bulk-select",
-        data={"request_ids": request_ids, "checked": "true" if checked else "false"},
+        data={"request_ids": ",".join(request_ids), "checked": "true" if checked else "false"},
     )
     assert response.status_code == 200, response.text
+    return response
+
+
+def _row_checked(html: str, request_id: str) -> bool:
+    # Distinguishes an actual `checked` HTML attribute on this row's own
+    # checkbox from the literal string "checked" that always appears as a
+    # JSON *key name* inside every checkbox's hx-vals, regardless of its
+    # real state.
+    match = re.search(rf'name="request_ids" value="{re.escape(request_id)}"\s*\n\s*(checked)?', html)
+    assert match, f"checkbox for {request_id} not found in:\n{html[:800]}"
+    return match.group(1) == "checked"
 
 
 def _confirm_dialog_count(dialog_text: str) -> int:
@@ -177,6 +195,107 @@ def test_bulk_cancel_form_drops_ids_not_owned_by_this_operator():
         assert _confirm_dialog_count(dialog.text) == 1
         assert "leave_request" in dialog.text
         assert "purchase_order" not in dialog.text
+
+
+# --------------------------------------------------------- select-all/toolbar ----
+# See docs/SELECT_ALL_CHECKBOX_PLAN.md -- the table is split into three
+# independently-refreshable regions (header row w/ select-all checkbox,
+# toolbar fragment, tbody). These tests cover the mechanics that split
+# enables: the periodic-poll route only ever returns tbody rows, the
+# select-all checkbox's own bulk-select request updates every row on the
+# page plus the toolbar (out-of-band), and Prev/Next keeps the toolbar's
+# baked-in page/query_id in sync even though the toolbar itself lives
+# outside #request-list.
+
+def test_periodic_poll_route_returns_table_wrapped_tbody_only():
+    with _client_as("operator1") as client:
+        client.get("/ui/operator")
+        request_id = _create_as(client, vendor="poll-target")
+        response = client.post("/ui/operator/rows", data={"page": 0, "query_id": ""})
+        assert response.status_code == 200, response.text
+        assert response.text.strip().startswith("<table>")
+        assert 'id="request-rows"' in response.text
+        assert f'id="row-{request_id}"' in response.text
+        # The poll route never touches selection/toolbar -- its response
+        # has no reason to carry a toolbar fragment at all.
+        assert "bulk-toolbar-operator" not in response.text
+
+
+def test_select_all_checks_every_row_and_updates_toolbar_out_of_band():
+    with _client_as("operator1") as client:
+        client.get("/ui/operator")
+        ids = [_create_as(client, vendor=f"selall-{i}") for i in range(3)]
+
+        checked = _select(client, "operator", ids, checked=True)
+        for request_id in ids:
+            assert _row_checked(checked.text, request_id)
+        assert "3 selected" in checked.text
+        assert 'id="bulk-toolbar-operator"' in checked.text
+        assert 'hx-swap-oob="true"' in checked.text
+
+        unchecked = _select(client, "operator", ids, checked=False)
+        for request_id in ids:
+            assert not _row_checked(unchecked.text, request_id)
+        assert "0 selected" in unchecked.text
+
+
+def test_select_all_checkbox_itself_is_always_rendered_unchecked():
+    # Stateless action trigger, not a status indicator -- even when every
+    # row on the page is already selected, the header checkbox itself
+    # never renders a `checked` attribute (see docs/SELECT_ALL_CHECKBOX_PLAN.md's
+    # "Decisions").
+    with _client_as("operator1") as client:
+        client.get("/ui/operator")
+        ids = [_create_as(client, vendor=f"stateless-{i}") for i in range(2)]
+        _select(client, "operator", ids, checked=True)
+
+        page = client.get("/ui/operator")
+        select_all = re.search(r'<input type="checkbox"\s*\n\s*hx-post="/ui/operator/bulk-select"[^>]*>', page.text)
+        assert select_all, page.text[:800]
+        assert "checked" not in select_all.group(0).split("hx-post")[0]
+
+
+def test_per_row_checkbox_click_still_updates_toolbar_out_of_band():
+    # Per-row checkboxes keep hx-swap="none" client-side (already visually
+    # correct the instant they're clicked), but the response still needs
+    # to carry a correct toolbar OOB update -- verified here server-side,
+    # since a real browser's handling of the "none" + OOB combination
+    # can't be exercised through TestClient.
+    with _client_as("operator1") as client:
+        client.get("/ui/operator")
+        request_id = _create_as(client)
+        response = _select(client, "operator", [request_id], checked=True)
+        assert "1 selected" in response.text
+        assert 'id="bulk-toolbar-operator"' in response.text
+        assert 'hx-swap-oob="true"' in response.text
+
+
+def test_prev_next_navigation_keeps_toolbar_in_sync():
+    with _client_as("operator1") as client:
+        client.get("/ui/operator")
+        nav = client.post("/ui/operator/list", data={"page": 0, "query_id": ""})
+        assert nav.status_code == 200
+        assert 'id="request-list"' in nav.text
+        assert 'id="bulk-toolbar-operator"' in nav.text
+        assert 'hx-swap-oob="true"' in nav.text
+
+
+def test_manager_select_all_and_periodic_poll():
+    with _client_as("operator1") as client:
+        ids = [_create_as(client, vendor=f"mgr-selall-{i}") for i in range(2)]
+
+    with _client_as("manager1") as manager:
+        manager.get("/ui/manager")
+        poll = manager.post("/ui/manager/rows", data={"page": 0, "query_id": ""})
+        assert poll.status_code == 200
+        assert poll.text.strip().startswith("<table>")
+        assert "bulk-toolbar-manager" not in poll.text
+
+        checked = _select(manager, "manager", ids, checked=True)
+        for request_id in ids:
+            assert _row_checked(checked.text, request_id)
+        assert "2 selected" in checked.text
+        assert 'id="bulk-toolbar-manager"' in checked.text
 
 
 # ----------------------------------------------------------------- cancel ----

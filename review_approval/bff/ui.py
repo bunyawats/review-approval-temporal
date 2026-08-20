@@ -100,28 +100,58 @@ def _render(
     )
 
 
+def _toolbar_oob(role: str, permissions: set[str], selected_ids: set[str], page: int, query_id: str) -> str:
+    """Out-of-band render of the bulk-selection toolbar fragment (see
+    docs/SELECT_ALL_CHECKBOX_PLAN.md) -- the toolbar lives outside
+    #request-list now (a sibling <div>, not a <tr> inside its <thead>),
+    specifically so the periodic poll can be scoped to just the table's
+    <tbody> without also rebuilding the header row's select-all checkbox
+    every cycle. Every route whose response could otherwise leave this
+    fragment's baked-in page/query_id or selected-count stale -- page
+    navigation (Prev/Next), any checkbox action, a fresh create, a
+    completed bulk action -- calls this and appends the result to its
+    response. The one exception is the initial full-page load, which
+    renders this same template inline (oob=False) via
+    operator.html/manager.html instead.
+    """
+    return templates.get_template(f"_{role}_bulk_toolbar.html").render(
+        {
+            "permissions": permissions,
+            "selected_ids": selected_ids,
+            "page": page,
+            "query_id": query_id,
+            "oob": True,
+        }
+    )
+
+
 def _bulk_result_response(
     request: Request,
     action: str,
     results: list[service.BulkActionResult],
-    list_template: str,
+    role: str,
     list_ctx: dict,
 ) -> HTMLResponse:
-    """A bulk execute route's response needs two independent fragments in
-    one body (see docs/BULK_ACTIONS_PLAN.md's "Results + table refresh"):
-    a small results dialog swapped into #dialog-container, plus the
-    caller's list table re-rendered with hx-swap-oob="true" so it reflects
-    the new statuses -- including for selected rows that aren't on the
-    currently-displayed page. These are two logically separate templates
-    (not one template emitting both fragments, unlike _operator_list.html's
-    own clear_dialog OOB div), so each is rendered to a string via
-    templates.get_template().render() and concatenated.
+    """A bulk execute route's response needs three independent fragments
+    in one body (see docs/BULK_ACTIONS_PLAN.md's "Results + table
+    refresh" and docs/SELECT_ALL_CHECKBOX_PLAN.md): a small results
+    dialog swapped into #dialog-container, the caller's list table
+    re-rendered with hx-swap-oob="true" so it reflects the new statuses
+    (including for selected rows that aren't on the currently-displayed
+    page), and the toolbar (now "0 selected" -- the caller already
+    cleared selection by this point). These are independent templates,
+    so each is rendered to a string via templates.get_template().render()
+    and concatenated. `list_ctx` must contain `paged`/`permissions`/
+    `selected_ids`.
     """
     dialog_html = templates.get_template("_bulk_result_dialog.html").render(
         {"request": request, "action": action, "results": results}
     )
-    list_html = templates.get_template(list_template).render({"request": request, "oob": True, **list_ctx})
-    return HTMLResponse(dialog_html + list_html)
+    list_html = templates.get_template(f"_{role}_list.html").render({"request": request, "oob": True, **list_ctx})
+    toolbar_html = _toolbar_oob(
+        role, list_ctx["permissions"], list_ctx["selected_ids"], list_ctx["paged"].page, list_ctx["paged"].query_id
+    )
+    return HTMLResponse(dialog_html + list_html + toolbar_html)
 
 
 # Error responses from routes whose success path retargets the swap to a
@@ -210,7 +240,14 @@ async def operator_page(request: Request, user: dict = Depends(require_session_r
     return _render(
         request,
         "operator.html",
-        {"user": user, "paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+        {
+            "user": user,
+            "paged": paged,
+            "permissions": permissions,
+            "selected_ids": selected_ids,
+            "page": paged.page,
+            "query_id": paged.query_id,
+        },
     )
 
 
@@ -234,31 +271,104 @@ async def operator_list(
     # actually enforces the operator-visibility invariant now that the
     # filter itself is no longer sent on every request -- see CLAUDE.md's
     # "Operators see only requests where requester == their username".
+    #
+    # Now used only by Prev/Next (the periodic poll targets #request-rows
+    # directly via a separate route -- see operator_rows() below and
+    # docs/SELECT_ALL_CHECKBOX_PLAN.md). Prev/Next genuinely changes page,
+    # so unlike the poll it also OOB-refreshes the toolbar fragment,
+    # which lives outside #request-list and wouldn't otherwise pick up
+    # the new page/query_id baked into its Bulk-action button(s).
     _, pool = _clients(request)
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
-    # Poll route -- must NOT clear selection, only reflect current state.
+    # Must NOT clear selection, only reflect current state.
+    selected_ids = _get_selection(user["username"])
+    table_html = templates.get_template("_operator_list.html").render(
+        {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
+    )
+    toolbar_html = _toolbar_oob("operator", permissions, selected_ids, paged.page, paged.query_id)
+    return HTMLResponse(table_html + toolbar_html)
+
+
+@router.post("/operator/rows", response_class=HTMLResponse)
+async def operator_rows(
+    request: Request,
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("operator")),
+):
+    # The periodic 5s self-poll's own target, scoped to just the table
+    # body (see docs/SELECT_ALL_CHECKBOX_PLAN.md) -- this is what keeps
+    # the header row's select-all checkbox from being destroyed and
+    # rebuilt every cycle regardless of whether the user is mid-
+    # interaction with it. Same page/query_id resolution as
+    # operator_list(); doesn't touch selection or the toolbar, since
+    # polling alone never changes either.
+    _, pool = _clients(request)
+    paged = await _resolve_operator_page(pool, user, page, query_id)
+    permissions = await _user_permissions(user)
     selected_ids = _get_selection(user["username"])
     return _render(
         request,
-        "_operator_list.html",
+        "_operator_rows.html",
         {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
     )
 
 
 @router.post("/operator/bulk-select", response_class=HTMLResponse)
 async def operator_bulk_select(
-    request_ids: list[str] = Form([]),
+    request: Request,
+    request_ids: str = Form(""),
     checked: bool = Form(...),
+    page: int = Form(0),
+    query_id: str = Form(""),
     user: dict = Depends(require_session_role("operator")),
 ):
+    # request_ids arrives as a single comma-joined string, not a repeated
+    # form field per id -- htmx's hx-vals passes a JS array value
+    # straight to FormData.set(name, value), which (per the FormData/
+    # URLSearchParams spec) stringifies any non-string/non-Blob value via
+    # Array.prototype.toString() -- i.e. comma-joined into ONE field --
+    # rather than appending one field per element. Confirmed against the
+    # real pinned htmx4 bundle (htmx.org@4.0.0-beta6): its hx-vals
+    # handling does `n.set(e, t[e])`, never `n.append()`, with no
+    # array-aware special-casing. The templates now build this string
+    # explicitly (`.join(",")` for select-all, a bare id for a per-row
+    # checkbox) rather than relying on the coercion implicitly -- see
+    # _operator_row.html's/_operator_list.html's matching comments.
+    # request_ids never contains a literal comma (ids are UUIDs), so
+    # splitting on "," is unambiguous. This mismatch between what htmx
+    # actually sends and what this route used to parse
+    # (`list[str] = Form([])`, expecting repeated fields) is what broke
+    # the select-all checkbox's *value* from this feature's very first
+    # version -- a per-row checkbox's single-element array happened to
+    # "work" by accident, since a 1-element array's toString() has no
+    # comma to begin with.
+    ids = [i for i in request_ids.split(",") if i]
     # Gated by role only, not require_permission("Cancel") -- marking a row
     # "selected" has no side effect beyond what's rendered back to this same
     # user, so it doesn't need the heavier permission check. The real
     # enforcement point is cancel_review(), invoked from the execute route.
     sel = _get_selection(user["username"])
-    (sel.update if checked else sel.difference_update)(request_ids)
-    return HTMLResponse("")
+    (sel.update if checked else sel.difference_update)(ids)
+    # Every bulk-select response carries two independent fragments (see
+    # docs/SELECT_ALL_CHECKBOX_PLAN.md): the current page's rows, wrapped
+    # for <table> parsing safety -- meaningfully used as the primary swap
+    # target only by the select-all checkbox's own request
+    # (hx-target="#request-rows" hx-select="tbody" hx-swap="outerHTML");
+    # a per-row checkbox ignores it via hx-swap="none" -- and an OOB
+    # toolbar update, used by both. One route serves both cases without
+    # branching on which checkbox triggered it, same philosophy as the
+    # original selection design.
+    _, pool = _clients(request)
+    paged = await _resolve_operator_page(pool, user, page, query_id)
+    permissions = await _user_permissions(user)
+    selected_ids = _get_selection(user["username"])
+    rows_html = templates.get_template("_operator_rows.html").render(
+        {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
+    )
+    toolbar_html = _toolbar_oob("operator", permissions, selected_ids, paged.page, paged.query_id)
+    return HTMLResponse(rows_html + toolbar_html)
 
 
 @router.get("/operator/new-form", response_class=HTMLResponse)
@@ -317,11 +427,20 @@ async def create_request(
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
     selected_ids = _get_selection(user["username"])
-    return _render(
-        request,
-        "_operator_list.html",
-        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids, "clear_dialog": True},
+    list_html = templates.get_template("_operator_list.html").render(
+        {
+            "request": request,
+            "paged": paged,
+            "permissions": permissions,
+            "selected_ids": selected_ids,
+            "clear_dialog": True,
+        }
     )
+    # The view just reset to page 0 -- refresh the toolbar's baked-in
+    # page/query_id to match, same reasoning as operator_list()'s OOB
+    # toolbar refresh on Prev/Next.
+    toolbar_html = _toolbar_oob("operator", permissions, selected_ids, paged.page, paged.query_id)
+    return HTMLResponse(list_html + toolbar_html)
 
 
 @router.get("/operator/{request_id}/edit-form", response_class=HTMLResponse)
@@ -511,7 +630,7 @@ async def bulk_cancel_execute(
         request,
         "Cancel",
         results,
-        "_operator_list.html",
+        "operator",
         {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
     )
 
@@ -541,7 +660,14 @@ async def manager_page(request: Request, user: dict = Depends(require_session_ro
     return _render(
         request,
         "manager.html",
-        {"user": user, "paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+        {
+            "user": user,
+            "paged": paged,
+            "permissions": permissions,
+            "selected_ids": selected_ids,
+            "page": paged.page,
+            "query_id": paged.query_id,
+        },
     )
 
 
@@ -560,27 +686,71 @@ async def manager_list(
     # ValueError -- fall back to a fresh, uncached page at the same page
     # number rather than resetting the user to page 0 or erroring out a
     # poll they never directly triggered.
+    #
+    # Now used only by Prev/Next -- the periodic poll targets #request-rows
+    # directly via manager_rows() below (see
+    # docs/SELECT_ALL_CHECKBOX_PLAN.md). Prev/Next also OOB-refreshes the
+    # toolbar fragment, which lives outside #request-list and wouldn't
+    # otherwise pick up the new page/query_id.
     _, pool = _clients(request)
     paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
-    # Poll route -- must NOT clear selection, only reflect current state.
+    # Must NOT clear selection, only reflect current state.
+    selected_ids = _get_selection(user["username"])
+    table_html = templates.get_template("_manager_list.html").render(
+        {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
+    )
+    toolbar_html = _toolbar_oob("manager", permissions, selected_ids, paged.page, paged.query_id)
+    return HTMLResponse(table_html + toolbar_html)
+
+
+@router.post("/manager/rows", response_class=HTMLResponse)
+async def manager_rows(
+    request: Request,
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("manager")),
+):
+    # The periodic 5s self-poll's own target -- see operator_rows()'s
+    # comment and docs/SELECT_ALL_CHECKBOX_PLAN.md.
+    _, pool = _clients(request)
+    paged = await _resolve_manager_page(pool, page, query_id)
+    permissions = await _user_permissions(user)
     selected_ids = _get_selection(user["username"])
     return _render(
         request,
-        "_manager_list.html",
+        "_manager_rows.html",
         {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
     )
 
 
 @router.post("/manager/bulk-select", response_class=HTMLResponse)
 async def manager_bulk_select(
-    request_ids: list[str] = Form([]),
+    request: Request,
+    request_ids: str = Form(""),
     checked: bool = Form(...),
+    page: int = Form(0),
+    query_id: str = Form(""),
     user: dict = Depends(require_session_role("manager")),
 ):
+    # See operator_bulk_select()'s comment for why this is a single
+    # comma-joined string, not repeated form fields.
+    ids = [i for i in request_ids.split(",") if i]
     sel = _get_selection(user["username"])
-    (sel.update if checked else sel.difference_update)(request_ids)
-    return HTMLResponse("")
+    (sel.update if checked else sel.difference_update)(ids)
+    # See operator_bulk_select()'s comment and
+    # docs/SELECT_ALL_CHECKBOX_PLAN.md -- rows fragment (meaningfully
+    # used only by the select-all checkbox's own request) + OOB toolbar
+    # update (used by both), one route serving both cases.
+    _, pool = _clients(request)
+    paged = await _resolve_manager_page(pool, page, query_id)
+    permissions = await _user_permissions(user)
+    selected_ids = _get_selection(user["username"])
+    rows_html = templates.get_template("_manager_rows.html").render(
+        {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
+    )
+    toolbar_html = _toolbar_oob("manager", permissions, selected_ids, paged.page, paged.query_id)
+    return HTMLResponse(rows_html + toolbar_html)
 
 
 @router.post("/manager/bulk-decision-form", response_class=HTMLResponse)
@@ -662,7 +832,7 @@ async def bulk_decision_execute(
         request,
         action,
         results,
-        "_manager_list.html",
+        "manager",
         {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
     )
 
