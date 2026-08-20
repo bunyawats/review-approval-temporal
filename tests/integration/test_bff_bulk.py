@@ -329,8 +329,8 @@ def test_bulk_cancel_flow_end_to_end():
 
 
 def test_manager_cannot_bulk_cancel():
-    with _client_as("operator1") as client:
-        request_id = _create_as(client)
+    # Permission enforcement runs before any body logic (require_permission
+    # via Depends), so this 403s regardless of whether any request exists.
     with _client_as("manager1") as manager:
         response = manager.post(
             "/ui/operator/bulk-cancel-form", data={"page": 0, "query_id": ""}
@@ -370,8 +370,9 @@ def test_bulk_approve_flow_end_to_end():
 
 
 def test_operator_cannot_bulk_decide():
+    # require_session_role("manager") gates this route before any body
+    # logic runs, so this 403s regardless of whether any request exists.
     with _client_as("operator1") as client:
-        request_id = _create_as(client)
         response = client.post(
             "/ui/manager/bulk-decision-form",
             data={"decision": "APPROVED", "page": 0, "query_id": ""},
