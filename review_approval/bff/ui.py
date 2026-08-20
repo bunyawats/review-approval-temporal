@@ -16,6 +16,7 @@ import json
 import os
 from typing import Any
 
+import asyncpg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -44,6 +45,23 @@ templates = Jinja2Templates(
 # page_size, so it has to be resupplied every time to keep row slicing
 # consistent with what's actually rendered.
 _UI_PAGE_SIZE = 10
+
+# username -> set of selected request_ids, for the bulk cancel/approve/reject
+# selection UI (see docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI"). In-
+# process only, deliberately -- same "correct without a shared cache, a
+# replica miss just shows unchecked, never wrong data" reasoning as
+# service.py's _query_cache. If/when docs/SESSION_STORE_PLAN.md's Redis
+# session store lands, this can move there for free; _get_selection()/
+# _clear_selection() stay the seam, only their bodies would change.
+_bulk_selection: dict[str, set[str]] = {}
+
+
+def _get_selection(username: str) -> set[str]:
+    return _bulk_selection.setdefault(username, set())
+
+
+def _clear_selection(username: str) -> None:
+    _bulk_selection.pop(username, None)
 
 
 def _clients(request: Request):
@@ -80,6 +98,30 @@ def _render(
     return templates.TemplateResponse(
         request, template, ctx, status_code=status_code, headers=headers
     )
+
+
+def _bulk_result_response(
+    request: Request,
+    action: str,
+    results: list[service.BulkActionResult],
+    list_template: str,
+    list_ctx: dict,
+) -> HTMLResponse:
+    """A bulk execute route's response needs two independent fragments in
+    one body (see docs/BULK_ACTIONS_PLAN.md's "Results + table refresh"):
+    a small results dialog swapped into #dialog-container, plus the
+    caller's list table re-rendered with hx-swap-oob="true" so it reflects
+    the new statuses -- including for selected rows that aren't on the
+    currently-displayed page. These are two logically separate templates
+    (not one template emitting both fragments, unlike _operator_list.html's
+    own clear_dialog OOB div), so each is rendered to a string via
+    templates.get_template().render() and concatenated.
+    """
+    dialog_html = templates.get_template("_bulk_result_dialog.html").render(
+        {"request": request, "action": action, "results": results}
+    )
+    list_html = templates.get_template(list_template).render({"request": request, "oob": True, **list_ctx})
+    return HTMLResponse(dialog_html + list_html)
 
 
 # Error responses from routes whose success path retargets the swap to a
@@ -134,14 +176,42 @@ async def logout_submit(request: Request):
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
+async def _resolve_operator_page(pool: asyncpg.Pool, user: dict, page: int, query_id: str) -> service.PagedReviews:
+    """Shared by operator_list() and the bulk-cancel execute route (both
+    need to re-render the same list page a user was already on) -- see
+    operator_list()'s own docstring-length comment for why the cached
+    filter's requester has to be re-checked against this session before
+    it's trusted.
+    """
+    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
+    if query_id:
+        try:
+            candidate = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate.filter.get("requester") == user["username"]:
+            return candidate
+    return await service.list_reviews_page(
+        pool, page=page, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]}
+    )
+
+
 # ------------------------------------------------------------- operator ----
 
 @router.get("/operator", response_class=HTMLResponse)
 async def operator_page(request: Request, user: dict = Depends(require_session_role("operator"))):
+    # A fresh navigation/reload clears any stale selection from a previous
+    # visit -- see docs/BULK_ACTIONS_PLAN.md's "Clearing selection".
+    _clear_selection(user["username"])
     _, pool = _clients(request)
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    return _render(request, "operator.html", {"user": user, "paged": paged, "permissions": permissions})
+    selected_ids = _get_selection(user["username"])
+    return _render(
+        request,
+        "operator.html",
+        {"user": user, "paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
 
 
 @router.post("/operator/list", response_class=HTMLResponse)
@@ -165,21 +235,30 @@ async def operator_list(
     # filter itself is no longer sent on every request -- see CLAUDE.md's
     # "Operators see only requests where requester == their username".
     _, pool = _clients(request)
-    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
-    paged = None
-    if query_id:
-        try:
-            candidate = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id)
-        except ValueError:
-            candidate = None
-        if candidate is not None and candidate.filter.get("requester") == user["username"]:
-            paged = candidate
-    if paged is None:
-        paged = await service.list_reviews_page(
-            pool, page=page, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]}
-        )
+    paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
-    return _render(request, "_operator_list.html", {"paged": paged, "permissions": permissions})
+    # Poll route -- must NOT clear selection, only reflect current state.
+    selected_ids = _get_selection(user["username"])
+    return _render(
+        request,
+        "_operator_list.html",
+        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
+
+
+@router.post("/operator/bulk-select", response_class=HTMLResponse)
+async def operator_bulk_select(
+    request_ids: list[str] = Form([]),
+    checked: bool = Form(...),
+    user: dict = Depends(require_session_role("operator")),
+):
+    # Gated by role only, not require_permission("Cancel") -- marking a row
+    # "selected" has no side effect beyond what's rendered back to this same
+    # user, so it doesn't need the heavier permission check. The real
+    # enforcement point is cancel_review(), invoked from the execute route.
+    sel = _get_selection(user["username"])
+    (sel.update if checked else sel.difference_update)(request_ids)
+    return HTMLResponse("")
 
 
 @router.get("/operator/new-form", response_class=HTMLResponse)
@@ -237,7 +316,12 @@ async def create_request(
     # New requests sort first (created_at DESC) -- page 0 always shows it.
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    return _render(request, "_operator_list.html", {"paged": paged, "permissions": permissions, "clear_dialog": True})
+    selected_ids = _get_selection(user["username"])
+    return _render(
+        request,
+        "_operator_list.html",
+        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids, "clear_dialog": True},
+    )
 
 
 @router.get("/operator/{request_id}/edit-form", response_class=HTMLResponse)
@@ -350,14 +434,115 @@ async def operator_detail(request: Request, request_id: str, user: dict = Depend
     return _render(request, "_detail_dialog.html", {"record": record, "role": "operator"})
 
 
+@router.post("/operator/bulk-cancel-form", response_class=HTMLResponse)
+async def bulk_cancel_form(
+    request: Request,
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_permission("Cancel")),
+):
+    _, pool = _clients(request)
+    ids = _get_selection(user["username"])
+    items = await service.get_reviews(pool, list(ids))
+    # Defense in depth for the visibility invariant, same principle as
+    # every other operator route (see CLAUDE.md's "Visibility" invariant)
+    # -- _bulk_selection[username] should never actually contain another
+    # user's id, since bulk_select() only ever mutates the caller's own
+    # entry, but this keeps the preview honest regardless.
+    items = [r for r in items if r["requester"] == user["username"]]
+    return _render(
+        request,
+        "_bulk_confirm_dialog.html",
+        {
+            "action": "Cancel",
+            "items": items,
+            "post_url": "/ui/operator/bulk-cancel",
+            "role": "operator",
+            "decision": None,
+            "page": page,
+            "query_id": query_id,
+        },
+    )
+
+
+@router.post("/operator/bulk-cancel", response_class=HTMLResponse)
+async def bulk_cancel_execute(
+    request: Request,
+    comment: str = Form(""),
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_permission("Cancel")),
+):
+    client, pool = _clients(request)
+    ids = _get_selection(user["username"])
+    try:
+        results = await service.bulk_cancel_reviews(client, pool, list(ids), user["username"], comment)
+    except ValueError as e:
+        # Empty selection or over the _MAX_BULK_SIZE cap (the latter only
+        # reachable if a selection spans enough pages to exceed it) --
+        # re-render the confirm dialog with the error rather than a raw
+        # 400, same pattern as every other dialog's error path.
+        items = await service.get_reviews(pool, list(ids))
+        items = [r for r in items if r["requester"] == user["username"]]
+        return _render(
+            request,
+            "_bulk_confirm_dialog.html",
+            {
+                "action": "Cancel",
+                "items": items,
+                "post_url": "/ui/operator/bulk-cancel",
+                "role": "operator",
+                "decision": None,
+                "page": page,
+                "query_id": query_id,
+                "error": str(e),
+            },
+            400,
+            headers=_RETARGET_DIALOG_HEADERS,
+        )
+    # An id can legitimately go stale between selection and this point
+    # (someone else acted on it) -- fine, that's exactly the best-effort,
+    # per-item-results semantics; bulk_cancel_reviews() already reflects it.
+    _clear_selection(user["username"])
+    paged = await _resolve_operator_page(pool, user, page, query_id)
+    permissions = await _user_permissions(user)
+    selected_ids = _get_selection(user["username"])  # empty -- just cleared
+    return _bulk_result_response(
+        request,
+        "Cancel",
+        results,
+        "_operator_list.html",
+        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
+
+
+async def _resolve_manager_page(pool: asyncpg.Pool, page: int, query_id: str) -> service.PagedReviews:
+    """Shared by manager_list() and the bulk-decision execute route -- see
+    manager_list()'s own comment for the count-cache/fallback reasoning.
+    """
+    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
+    try:
+        return await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id or None)
+    except ValueError:
+        return await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE)
+
+
 # -------------------------------------------------------------- manager ----
 
 @router.get("/manager", response_class=HTMLResponse)
 async def manager_page(request: Request, user: dict = Depends(require_session_role("manager"))):
+    # A fresh navigation/reload clears any stale selection from a previous
+    # visit -- see docs/BULK_ACTIONS_PLAN.md's "Clearing selection".
+    _clear_selection(user["username"])
     _, pool = _clients(request)
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE)
     permissions = await _user_permissions(user)
-    return _render(request, "manager.html", {"user": user, "paged": paged, "permissions": permissions})
+    selected_ids = _get_selection(user["username"])
+    return _render(
+        request,
+        "manager.html",
+        {"user": user, "paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
 
 
 @router.post("/manager/list", response_class=HTMLResponse)
@@ -376,13 +561,110 @@ async def manager_list(
     # number rather than resetting the user to page 0 or erroring out a
     # poll they never directly triggered.
     _, pool = _clients(request)
-    page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
-    try:
-        paged = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id or None)
-    except ValueError:
-        paged = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE)
+    paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
-    return _render(request, "_manager_list.html", {"paged": paged, "permissions": permissions})
+    # Poll route -- must NOT clear selection, only reflect current state.
+    selected_ids = _get_selection(user["username"])
+    return _render(
+        request,
+        "_manager_list.html",
+        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
+
+
+@router.post("/manager/bulk-select", response_class=HTMLResponse)
+async def manager_bulk_select(
+    request_ids: list[str] = Form([]),
+    checked: bool = Form(...),
+    user: dict = Depends(require_session_role("manager")),
+):
+    sel = _get_selection(user["username"])
+    (sel.update if checked else sel.difference_update)(request_ids)
+    return HTMLResponse("")
+
+
+@router.post("/manager/bulk-decision-form", response_class=HTMLResponse)
+async def bulk_decision_form(
+    request: Request,
+    decision: str = Form(...),
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("manager")),
+):
+    # Approve/reject need different permissions -- which one depends on
+    # the submitted decision, so this can't be expressed as a single
+    # Depends(require_permission(...)); check it explicitly instead.
+    # Mirrors manager_decision()/api/routes.py's submit_decision.
+    permission = "Approve" if decision == "APPROVED" else "Reject"
+    await check_permission(user, permission)
+    _, pool = _clients(request)
+    ids = _get_selection(user["username"])
+    items = await service.get_reviews(pool, list(ids))
+    # No visibility filter needed here -- managers see everything.
+    return _render(
+        request,
+        "_bulk_confirm_dialog.html",
+        {
+            "action": "Approve" if decision == "APPROVED" else "Reject",
+            "items": items,
+            "post_url": "/ui/manager/bulk-decision",
+            "role": "manager",
+            "decision": decision,
+            "page": page,
+            "query_id": query_id,
+        },
+    )
+
+
+@router.post("/manager/bulk-decision", response_class=HTMLResponse)
+async def bulk_decision_execute(
+    request: Request,
+    decision: str = Form(...),
+    comment: str = Form(""),
+    page: int = Form(0),
+    query_id: str = Form(""),
+    user: dict = Depends(require_session_role("manager")),
+):
+    permission = "Approve" if decision == "APPROVED" else "Reject"
+    await check_permission(user, permission)
+    client, pool = _clients(request)
+    ids = _get_selection(user["username"])
+    action = "Approve" if decision == "APPROVED" else "Reject"
+    try:
+        results = await service.bulk_submit_decision(client, pool, list(ids), decision, user["username"], comment)
+    except ValueError as e:
+        # Empty selection, over the _MAX_BULK_SIZE cap, or (shouldn't
+        # happen -- the toolbar only ever submits a value it rendered
+        # itself) an invalid decision value -- re-render the confirm
+        # dialog with the error, same pattern as every other dialog.
+        items = await service.get_reviews(pool, list(ids))
+        return _render(
+            request,
+            "_bulk_confirm_dialog.html",
+            {
+                "action": action,
+                "items": items,
+                "post_url": "/ui/manager/bulk-decision",
+                "role": "manager",
+                "decision": decision,
+                "page": page,
+                "query_id": query_id,
+                "error": str(e),
+            },
+            400,
+            headers=_RETARGET_DIALOG_HEADERS,
+        )
+    _clear_selection(user["username"])
+    paged = await _resolve_manager_page(pool, page, query_id)
+    permissions = await _user_permissions(user)
+    selected_ids = _get_selection(user["username"])  # empty -- just cleared
+    return _bulk_result_response(
+        request,
+        action,
+        results,
+        "_manager_list.html",
+        {"paged": paged, "permissions": permissions, "selected_ids": selected_ids},
+    )
 
 
 @router.get("/manager/{request_id}/detail", response_class=HTMLResponse)

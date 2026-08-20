@@ -1,4 +1,16 @@
 {% import "_manager_row.html" as row_macros %}
+{% set selected_ids = selected_ids | default([]) %}
+{#
+  Bulk-approve/reject selection column/toolbar exist whenever either
+  decision permission is granted -- see _manager_row.html's matching
+  comment and docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI".
+  selectable_ids is this page's PENDING_REVIEW ids (the only ones a
+  checkbox actually renders for).
+#}
+{% set has_select_column = "Approve" in permissions or "Reject" in permissions %}
+{% set selectable_ids = paged.items | selectattr("status", "equalto", "PENDING_REVIEW") | map(attribute="id") | list %}
+{% set all_selected = has_select_column and selectable_ids | length > 0 and (selectable_ids | select("in", selected_ids) | list | length == selectable_ids | length) %}
+{% set num_columns = 6 + (1 if has_select_column else 0) %}
 {#
   Unlike the operator list, this poll sends no requester filter (manager
   visibility is unrestricted), so it round-trips query_id to actually
@@ -10,11 +22,54 @@
   page the user is actually looking at.
 #}
 <table id="request-list"
+  {% if oob %}hx-swap-oob="true"{% endif %}
   hx-post="/ui/manager/list" hx-trigger="every 5s [!document.querySelector('.htmx-request')]" hx-swap="outerHTML"
   hx-vals='{"page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
   class="w-full border-collapse bg-white rounded-lg overflow-hidden shadow-sm">
   <thead>
+    {% if has_select_column %}
+    {#
+      Same "lives inside the outerHTML-replaced <table>, so it's always
+      current with zero extra plumbing" reasoning as the operator list's
+      toolbar. Approve/Reject are separately permissioned, so both
+      buttons are independently gated -- a future role with only one of
+      the two is a real possibility, same as the single-item Approve/
+      Reject buttons in _detail_dialog.html.
+    #}
     <tr>
+      <td colspan="{{ num_columns }}" class="px-3.5 py-2 border-b border-gray-200 bg-gray-50">
+        <div class="flex justify-between items-center text-sm">
+          <span class="text-gray-600">{{ selected_ids | length }} selected</span>
+          <div class="flex gap-2">
+            {% if "Reject" in permissions %}
+            <button type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              {% if not selected_ids %}disabled{% endif %}
+              hx-post="/ui/manager/bulk-decision-form"
+              hx-vals='{"decision": "REJECTED", "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
+              hx-target="#dialog-container" hx-swap="innerHTML">Bulk Reject</button>
+            {% endif %}
+            {% if "Approve" in permissions %}
+            <button type="button"
+              class="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              {% if not selected_ids %}disabled{% endif %}
+              hx-post="/ui/manager/bulk-decision-form"
+              hx-vals='{"decision": "APPROVED", "page": {{ paged.page }}, "query_id": "{{ paged.query_id }}"}'
+              hx-target="#dialog-container" hx-swap="innerHTML">Bulk Approve</button>
+            {% endif %}
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+    <tr>
+      {% if has_select_column %}
+      <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">
+        <input type="checkbox" {% if all_selected %}checked{% endif %}
+          hx-post="/ui/manager/bulk-select" hx-swap="none"
+          hx-vals='js:{"request_ids": {{ selectable_ids | tojson }}, "checked": event.target.checked}'>
+      </th>
+      {% endif %}
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">Type</th>
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">Requester</th>
       <th class="text-left px-3.5 py-2.5 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50">Status</th>
@@ -25,14 +80,14 @@
   </thead>
   <tbody>
     {% for r in paged.items %}
-    {{ row_macros.manager_row(r, permissions) }}
+    {{ row_macros.manager_row(r, permissions, selected_ids) }}
     {% else %}
-    <tr><td colspan="6" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
+    <tr><td colspan="{{ num_columns }}" class="px-3.5 py-2.5 text-sm text-gray-500">No requests yet.</td></tr>
     {% endfor %}
   </tbody>
   <tfoot>
     <tr>
-      <td colspan="6" class="px-3.5 py-2.5 border-t border-gray-200 bg-gray-50">
+      <td colspan="{{ num_columns }}" class="px-3.5 py-2.5 border-t border-gray-200 bg-gray-50">
         <div class="flex justify-between items-center text-sm text-gray-600">
           <span>
             {% if paged.total > 0 %}

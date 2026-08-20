@@ -1,0 +1,85 @@
+{#
+  Shared by all three bulk actions (Cancel/Approve/Reject) -- one
+  macro/template, multiple call sites, same pattern as
+  _operator_row.html/_manager_row.html rather than copy-pasting three
+  near-identical dialogs. See docs/BULK_ACTIONS_PLAN.md's "BFF: confirm
+  dialog + execute (Phase 4)".
+
+  Context: action ("Cancel"/"Approve"/"Reject"), items (fetched records,
+  already filtered to what this user may act on), post_url, role
+  ("operator"/"manager" -- whether to show a Requester column), decision
+  ("APPROVED"/"REJECTED", only set when role == "manager"), page,
+  query_id (the list page the user was on, round-tripped so the post-
+  action OOB table refresh lands back on the same page).
+
+  Note there's no request_ids param here at all: selection lives
+  server-side (bff/ui.py's _bulk_selection), so both the dialog-open and
+  execute routes read it themselves -- nothing client-submitted to
+  re-validate.
+#}
+{% set badge_classes = {
+  "pending_review": "bg-amber-100 text-amber-800",
+  "approved": "bg-green-100 text-green-800",
+  "rejected": "bg-red-100 text-red-800",
+  "cancelled": "bg-gray-200 text-gray-700",
+} %}
+{% set button_color = "bg-green-600 text-white hover:bg-green-700" if action == "Approve" else "bg-red-600 text-white hover:bg-red-700" %}
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[520px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">Bulk {{ action }} ({{ items | length }} selected)</h2>
+    {% if error %}
+    <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
+    {% endif %}
+
+    {% if not items %}
+    <p class="text-sm text-gray-600 mb-4">Nothing selected -- select one or more requests first.</p>
+    {% else %}
+    <div class="mb-4 max-h-[240px] overflow-y-auto border border-gray-200 rounded-md">
+      <table class="w-full border-collapse text-sm">
+        <tbody>
+          {% for r in items %}
+          <tr class="border-b border-gray-100 last:border-b-0">
+            <td class="px-2.5 py-1.5">{{ r.review_type }}</td>
+            {% if role == "manager" %}
+            <td class="px-2.5 py-1.5 text-gray-500">{{ r.requester }}</td>
+            {% endif %}
+            <td class="px-2.5 py-1.5">
+              <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(r.status|lower, 'bg-gray-200 text-gray-700') }}">
+                {{ r.status|replace("_", " ") }}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional, applied to all)</label>
+      <textarea id="bulk-comment"
+        class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm min-h-[80px]"></textarea>
+    </div>
+    {% endif %}
+
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">{{ "Close" if not items else "Never mind" }}</button>
+      {% if items %}
+      {#
+        Same "read a value, close the dialog client-side, fire
+        htmx.ajax()" pattern as every other dialog's confirm button --
+        simpler than those, since there's no id list or row-button
+        source to wire up (a bulk action doesn't map to one row's
+        stable-id button the way Edit/Cancel/Approve/Reject do). page/
+        query_id are baked in as literals from this render, same idiom
+        the list templates already use for their own Prev/Next buttons.
+      #}
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md {{ button_color }}"
+        onclick="var c = document.getElementById('bulk-comment').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '{{ post_url }}', {target: '#dialog-container', swap: 'innerHTML', values: {comment: c, page: {{ page }}, query_id: '{{ query_id }}'{% if decision %}, decision: '{{ decision }}'{% endif %}}})">
+        Confirm {{ action }}
+      </button>
+      {% endif %}
+    </div>
+  </div>
+</div>

@@ -5,18 +5,39 @@
 > file (same convention as `docs/PAGINATION_PLAN.md` and
 > `docs/SESSION_STORE_PLAN.md`).
 >
-> - [ ] Phase 1 — `workflow/service.py` bulk primitives (`bulk_cancel_reviews`,
+> - [x] Phase 1 — `workflow/service.py` bulk primitives (`bulk_cancel_reviews`,
 >       `bulk_submit_decision`, `get_reviews`, batch-size validation),
 >       no front door wired up yet
-> - [ ] Phase 2 — `api/routes.py`: `POST /reviews/bulk/cancel`,
+> - [x] Phase 2 — `api/routes.py`: `POST /reviews/bulk/cancel`,
 >       `POST /reviews/bulk/decision`
-> - [ ] Phase 3 — `bff/ui.py`: in-process `_bulk_selection` store +
+> - [x] Phase 3 — `bff/ui.py`: in-process `_bulk_selection` store +
 >       `POST /ui/{operator,manager}/bulk-select`; row/list templates
 >       render `checked` from server state, no client-side selection JS
-> - [ ] Phase 4 — `bff/`: confirm dialog (lists selected items, reads
+> - [x] Phase 4 — `bff/`: confirm dialog (lists selected items, reads
 >       selection server-side) + execute routes + results display +
 >       table refresh + selection clearing
-> - [ ] Phase 5 — tests + docs (`CLAUDE.md`)
+> - [x] Phase 5 — tests + docs (`CLAUDE.md`)
+>
+> All 5 phases implemented and verified end to end against the real local
+> stack (Keycloak in Docker, native Temporal/worker/Postgres) -- 86/86
+> tests pass (`pytest`, unit + integration). One deviation from this
+> file's original route sketch, made during implementation: the
+> dialog-open routes (`bulk-cancel-form`, `bulk-decision-form`) ended up
+> as `POST`, not `GET` like the existing single-item `-form` routes
+> (`cancel-form`, `edit-form`) -- `bulk-decision-form` needs `decision` in
+> its request, and both dialog-opens carry `page`/`query_id` forward so
+> the post-action OOB table refresh lands back on the page the user was
+> viewing (not spelled out in this file's original route sketch, but
+> needed once "reflect the new statuses ... for the same page/query_id
+> the user was already on" -- see "Results + table refresh" below -- was
+> actually implemented, since the execute routes have no other way to
+> know that page). One more implementation choice not spelled out below:
+> `_operator_row.html`/`_manager_row.html`'s checkbox `<td>` renders
+> (empty) even for a non-selectable row, whenever the column exists on
+> the page at all (i.e. the user holds the relevant permission) --
+> keeping the column's own header/body alignment intact matters more
+> here than the literal "only render the checkbox `<td>` when
+> `can_select`" phrasing below.
 
 ## Decisions already made (don't re-litigate without new information)
 

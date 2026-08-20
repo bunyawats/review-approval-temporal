@@ -343,3 +343,87 @@ async def submit_decision(
     # signal() only confirms Temporal accepted it -- wait for persist_decision
     # to actually write the new status before returning.
     await _wait_until(pool, request_id, lambda record: record["status"] == decision)
+
+
+# Bulk cancel/approve/reject (see docs/BULK_ACTIONS_PLAN.md). Every review
+# request is its own Temporal workflow execution -- there's no "signal N
+# workflow ids in one call" primitive -- so a bulk action is mechanically N
+# concurrent calls to the single-item functions above, collected into a
+# best-effort, per-item result list. This is a thin orchestration layer, not
+# a new code path with its own ownership/status logic: reusing
+# cancel_review()/submit_decision() means a bulk action inherits deleted-
+# workflow recovery, the already-decided guard, etc. for free.
+_MAX_BULK_SIZE = 50  # generous for a POC; see docs/BULK_ACTIONS_PLAN.md's
+# "Operational considerations" -- caps concurrent Postgres connections +
+# Temporal RPCs one bulk request can hold from the pool at once.
+
+
+@dataclass
+class BulkActionResult:
+    request_id: str
+    ok: bool
+    error: Optional[str] = None
+
+
+def _validate_bulk_ids(request_ids: list[str]) -> list[str]:
+    deduped = list(dict.fromkeys(request_ids))  # de-dup, preserve order
+    if not deduped:
+        raise ValueError("request_ids must not be empty")
+    if len(deduped) > _MAX_BULK_SIZE:
+        raise ValueError(f"a single bulk action supports at most {_MAX_BULK_SIZE} requests")
+    return deduped
+
+
+async def get_reviews(pool: asyncpg.Pool, request_ids: list[str]) -> list[dict]:
+    """Batch fetch, for rendering the bulk confirm dialog's preview list.
+    Read-only, no ordering/visibility enforcement of its own -- callers that
+    need the operator-visibility invariant (see CLAUDE.md) must filter the
+    *ids they submit* to ones the session is actually allowed to see; this
+    just resolves ids to rows.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM review_requests WHERE id = ANY($1::text[])", request_ids
+        )
+    return [dict(r) for r in rows]
+
+
+async def bulk_cancel_reviews(
+    client: Client,
+    pool: asyncpg.Pool,
+    request_ids: list[str],
+    requester: str,
+    comment: str = "",
+) -> list[BulkActionResult]:
+    ids = _validate_bulk_ids(request_ids)
+
+    async def _one(request_id: str) -> BulkActionResult:
+        try:
+            await cancel_review(client, pool, request_id, requester, comment)
+            return BulkActionResult(request_id, True)
+        except (LookupError, PermissionError, ValueError) as e:
+            return BulkActionResult(request_id, False, str(e))
+
+    return list(await asyncio.gather(*(_one(rid) for rid in ids)))
+
+
+async def bulk_submit_decision(
+    client: Client,
+    pool: asyncpg.Pool,
+    request_ids: list[str],
+    decision: str,
+    closed_by: str,
+    comment: str = "",
+) -> list[BulkActionResult]:
+    ids = _validate_bulk_ids(request_ids)
+    if decision not in ("APPROVED", "REJECTED"):
+        raise ValueError("decision must be APPROVED or REJECTED")
+
+    async def _one(request_id: str) -> BulkActionResult:
+        try:
+            await submit_decision(client, pool, request_id, decision, closed_by, comment)
+            return BulkActionResult(request_id, True)
+        except (LookupError, ValueError) as e:
+            return BulkActionResult(request_id, False, str(e))
+
+    return list(await asyncio.gather(*(_one(rid) for rid in ids)))

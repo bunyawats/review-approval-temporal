@@ -1,4 +1,4 @@
-{% macro manager_row(r, permissions=[]) %}
+{% macro manager_row(r, permissions=[], selected_ids=[]) %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",
@@ -13,7 +13,26 @@
   enforcement in bff/ui.py.
 #}
 {% set can_decide = r.status == "PENDING_REVIEW" and ("Approve" in permissions or "Reject" in permissions) %}
+{#
+  Selection column exists whenever either decision permission is
+  granted (bulk approve/reject share one column); a checkbox only
+  renders for rows actually eligible (PENDING_REVIEW) -- see
+  _operator_row.html's matching comment and
+  docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI".
+#}
+{% set has_select_column = "Approve" in permissions or "Reject" in permissions %}
+{% set can_select = r.status == "PENDING_REVIEW" and has_select_column %}
 <tr id="row-{{ r.id }}">
+  {% if has_select_column %}
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
+    {% if can_select %}
+    <input type="checkbox" name="request_ids" value="{{ r.id }}"
+      {% if r.id in selected_ids %}checked{% endif %}
+      hx-post="/ui/manager/bulk-select" hx-swap="none"
+      hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked": event.target.checked}'>
+    {% endif %}
+  </td>
+  {% endif %}
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.requester }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">

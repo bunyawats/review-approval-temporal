@@ -218,6 +218,27 @@ or `bff/` respectively; don't put front-door-specific logic in
   in `task_queues.py`. An `assert` at the bottom of this file checks the
   two stay in sync and fails loudly at import time if not — don't remove
   it.
+  **Bulk cancel/approve/reject** (`bulk_cancel_reviews()`,
+  `bulk_submit_decision()`, `get_reviews()`, `_validate_bulk_ids()`, see
+  `docs/BULK_ACTIONS_PLAN.md`) live in this file too, at the bottom.
+  They're thin orchestration over the single-item functions above, not a
+  new code path: `bulk_cancel_reviews()`/`bulk_submit_decision()` fan out
+  `asyncio.gather()` over `cancel_review()`/`submit_decision()` (one
+  Temporal signal + `_wait_until()` confirmation each), catching exactly
+  the exception types those functions are documented to raise
+  (`LookupError`/`PermissionError`/`ValueError`) into a per-item
+  `BulkActionResult(request_id, ok, error)` — anything else is a genuine
+  bug and is left to propagate, not swallowed into a misleading "failed"
+  result. This means a bulk action inherits deleted-workflow recovery,
+  the already-decided guard, etc. for free, with zero duplicated
+  ownership/status logic to drift out of sync. `_validate_bulk_ids()`
+  de-dupes (preserving order) and caps at `_MAX_BULK_SIZE = 50`, raising
+  `ValueError` for empty or over-cap input *before* any Temporal/Postgres
+  call. `get_reviews()` is a plain batch fetch (`WHERE id = ANY($1::
+  text[])`) for rendering the bulk confirm dialog's preview — read-only,
+  no visibility enforcement of its own; callers that need the operator-
+  visibility invariant must filter the *ids they submit* (see `bff/ui.py`
+  below).
 - **`api/routes.py`** — the JSON REST surface, real Keycloak auth. Thin:
   each route extracts params, calls `workflow/service.py`, maps
   exceptions to HTTP status codes. Each route depends on
@@ -228,6 +249,19 @@ or `bff/` respectively; don't put front-door-specific logic in
   dependency can't express, so that route checks the permission matching
   the submitted `decision` value inside the handler itself rather than
   via the dependency list.
+  **`POST /reviews/bulk/cancel`/`POST /reviews/bulk/decision`** (bodies:
+  `{"request_ids": [...], "comment": ""}` /
+  `{"request_ids": [...], "decision": "APPROVED"|"REJECTED", "comment":
+  ""}`) reuse the exact same `require_permission("Cancel")`/inline
+  `check_permission("Approve"/"Reject")` gates as their single-item
+  counterparts — no new permission introduced, a bulk call is authorized
+  exactly like N individual calls would be. Response shape: `{"results":
+  [{"request_id", "ok", "error"}, ...], "succeeded": int, "failed":
+  int}`. **Both are registered before the `/reviews/{request_id}/...`
+  routes**, not after — FastAPI matches path routes in registration
+  order, and `/reviews/bulk/cancel` has the same 3-segment shape as
+  `/reviews/{request_id}/cancel`; registering the parameterized route
+  first would silently swallow the bulk route with `request_id="bulk"`.
 - **`api/auth.py`** — Keycloak JWT validation + **permission-check**
   dependency (`require_permission(permission: str)`) for the JSON API —
   not a role check. Temporal has zero concept of roles or permissions;
@@ -352,6 +386,59 @@ or `bff/` respectively; don't put front-door-specific logic in
   is the id every dialog fragment's own outer wrapper carries
   (`_form_dialog.html`, `_cancel_dialog.html`, `_detail_dialog.html`),
   so this reselect target is stable across all three.
+  **Bulk cancel/approve/reject selection (`docs/BULK_ACTIONS_PLAN.md`)**:
+  `_bulk_selection: dict[str, set[str]]` is an in-process,
+  username-keyed store (`_get_selection()`/`_clear_selection()`) — same
+  "correct without a shared cache, a replica miss just shows unchecked,
+  never wrong data" reasoning as `service.py`'s `_query_cache`.
+  `POST /ui/{operator,manager}/bulk-select` (`request_ids`, `checked`)
+  is gated by `require_session_role(...)` only, **not**
+  `require_permission("Cancel")`/etc. — marking a row "selected" has no
+  side effect beyond what's rendered back to this same user, so it
+  doesn't need the heavier permission check; the real enforcement stays
+  at `cancel_review()`/`submit_decision()`, invoked from the execute
+  routes below. Selection clears on a fresh `GET /ui/operator`/
+  `/ui/manager` (a real navigation/reload) and after a confirmed bulk
+  action, but **not** on the 5s poll route (`operator_list()`/
+  `manager_list()`) — those only read current selection to render
+  `checked` state. `_resolve_operator_page()`/`_resolve_manager_page()`
+  factor out the page/query_id resolution logic `operator_list()`/
+  `manager_list()` already had, since the bulk execute routes below need
+  the identical logic to re-render the same list page after clearing
+  selection.
+  **Confirm dialog + execute (Phase 4)**: `POST
+  /ui/operator/bulk-cancel-form` → `POST /ui/operator/bulk-cancel`, and
+  `POST /ui/manager/bulk-decision-form` → `POST /ui/manager/bulk-
+  decision`, mirroring the existing dialog-then-execute pattern
+  (`cancel-form` → `cancel`) but **both dialog-open routes are `POST`,
+  not `GET`** like the single-item `-form` routes — `bulk-decision-form`
+  needs `decision` in the request, and both carry `page`/`query_id`
+  forward (baked into the toolbar buttons' `hx-vals`, then round-tripped
+  through the confirm dialog's own `htmx.ajax()` call) so the execute
+  route can re-render the same list page the user was already viewing.
+  Neither route takes a `request_ids` param — both read
+  `_get_selection(user["username"])` themselves, since Phase 3 made the
+  server the sole source of truth for selection; `bulk-cancel-form`
+  additionally filters `service.get_reviews()`'s result to `requester ==
+  user["username"]` before rendering the preview, defense in depth for
+  the visibility invariant (see below) even though `_bulk_selection[
+  username]` should never actually contain another operator's id in the
+  first place. A `ValueError` from the execute call (empty selection, or
+  over `_MAX_BULK_SIZE` — reachable if a selection spans enough pages)
+  re-renders the confirm dialog with the error via
+  `_RETARGET_DIALOG_HEADERS`, same pattern as every other dialog's error
+  path — not a raw 400.
+  `_bulk_result_response()` assembles a bulk execute route's response
+  from **two independently-rendered templates concatenated into one
+  body** (`templates.get_template(name).render(...)`, not
+  `TemplateResponse`): `_bulk_result_dialog.html` (swapped into
+  `#dialog-container`) plus the caller's list template re-rendered with
+  `oob=True` (adds `hx-swap-oob="true"` to `<table id="request-list">`,
+  parameterizing `_operator_list.html`/`_manager_list.html` the same way
+  `clear_dialog` already does) — this is what makes the just-cancelled/
+  decided rows' new statuses show up immediately without waiting for the
+  next 5s poll tick, including for selected rows that weren't on the
+  currently-displayed page.
 - **`bff/templates/`** — Jinja2 templates. `base.html` is the shell;
   `_*.html` are HTMX fragments, not full pages. This project's Starlette
   version requires **`TemplateResponse(request, name, context)`**
@@ -415,6 +502,60 @@ or `bff/` respectively; don't put front-door-specific logic in
   full mechanism). `select: 'tr'` on every caller's `htmx.ajax()` (see
   `bff/ui.py` above) is what pulls the correctly-parsed `<tr>` back out
   of that wrapper for the actual swap.
+  **Bulk-selection checkbox column**: both macros take a
+  `selected_ids: set[str] = set()` param (same default-empty pattern as
+  `permissions=[]`). The column exists on the page at all whenever the
+  relevant permission is granted (`has_select_column` — `"Cancel" in
+  permissions` for operator, `"Approve" in permissions or "Reject" in
+  permissions` for manager); within that column, a checkbox only renders
+  for rows actually eligible for a bulk action (`can_select = r.status
+  == "PENDING_REVIEW" and has_select_column`) — other rows still get an
+  empty `<td>` so header/body columns stay aligned (a deliberate
+  deviation from `docs/BULK_ACTIONS_PLAN.md`'s literal "only render the
+  checkbox `<td>`" phrasing — see that file's status tracker). Each
+  checkbox POSTs to `/ui/{operator,manager}/bulk-select` with `hx-swap=
+  "none"` (its own checked/unchecked state is already correct the
+  instant it's clicked; the POST just persists that fact server-side)
+  and `hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked":
+  event.target.checked}'` — the `js:` prefix (htmx4) is required, not
+  optional: native form-encoding only includes a checkbox's value when
+  *checked*, so an unchecking click would otherwise send no
+  `request_ids` at all.
+  **Known bug, not yet fixed**: the "select all on this page" header
+  checkbox does not currently work — clicking it neither updates its own
+  visible state nor any row checkbox's. Two fix attempts (an
+  `hx-target="#request-list" hx-swap="outerHTML"` variant of the same
+  declarative pattern, then an `onclick="...htmx.ajax(...)"` variant
+  matching the dialog-confirm-button idiom used elsewhere in this
+  codebase) were both tried and reverted after neither resolved it when
+  tested in a real browser — see git history / conversation record for
+  the reverted attempts if picking this back up. Root cause not yet
+  identified; needs actual browser devtools (console errors, Network
+  tab) to diagnose further, not more server-side reasoning — everything
+  server-side checked out correctly in both attempts via direct HTTP
+  requests against the running app.
+- **`bff/templates/_bulk_confirm_dialog.html`, `_bulk_result_dialog.html`**
+  — the bulk-action counterparts of `_form_dialog.html`/
+  `_cancel_dialog.html`/`_detail_dialog.html`. One shared confirm-dialog
+  template for all three actions (`action` param: `"Cancel"`/`"Approve"`/
+  `"Reject"`), following the same one-template/multiple-call-sites
+  pattern as `_operator_row.html`/`_manager_row.html` rather than
+  copy-pasting three near-identical dialogs. **Deliberately doesn't
+  render raw request ids** — only `review_type`, (`requester`, manager
+  only), and current `status` per selected item, plus a single shared
+  comment `<textarea>` — matching `docs/BULK_ACTIONS_PLAN.md`'s "one
+  shared comment per batch, not one per row" decision; tests that need
+  to tell selected items apart in this dialog's rendered HTML use
+  `review_type` as the distinguishing signal, not id (see
+  `tests/integration/test_bff_bulk.py`). Its confirm button is a
+  simplified version of every other dialog's "read a value, close the
+  dialog client-side, fire `htmx.ajax()`" pattern — simpler because
+  there's no id list or row-button `source` to wire up (a bulk action
+  doesn't map to one row's stable-id button). `_bulk_result_dialog.html`
+  renders the execute response's per-item results (`N succeeded, M
+  failed`, failures listed by id + error) — see `bff/ui.py`'s
+  `_bulk_result_response()` bullet above for how it's combined with an
+  OOB table refresh in one response body.
 - **`bff/sandbox.py`** — `/sandbox/*`, a standalone playground for htmx
   experiments, kept permanently alongside the app rather than thrown
   away after use (unlike an earlier throwaway `/ui/debug/*` diagnostic
@@ -468,6 +609,14 @@ or `bff/` respectively; don't put front-door-specific logic in
   invariant there is an explicit check that the cached entry's
   `filter.requester` still matches the session's username before
   trusting it — see `docs/PAGINATION_PLAN.md`'s BFF note.
+  **Bulk actions enforce this the same way, per item**: `bulk_cancel_reviews()`
+  is just N calls to `cancel_review()`, so ownership is re-checked per
+  id inside the loop, not once up front — an id for someone else's
+  request in the batch fails that one item (`PermissionError` → a
+  per-item `ok: false` result) without blocking the rest. The BFF's
+  `bulk-cancel-form` preview additionally filters `service.get_reviews()`
+  to `requester == user["username"]` before rendering, defense in depth
+  on top of that (see `bff/ui.py`'s bullet above).
 - **Terminal states are view-only, for both roles, no exceptions.** Once
   `APPROVED`/`REJECTED`/`CANCELLED`, nobody can edit, cancel, or
   re-decide — not the requester, not any manager.
@@ -476,6 +625,12 @@ or `bff/` respectively; don't put front-door-specific logic in
   only rendering action buttons on `PENDING_REVIEW` rows/dialogs. A new
   mutation needs the same guard in `service.py` — don't rely on the UI
   alone, since the JSON API is a second front door.
+  **Bulk actions enforce this the same way, per item** — an id that's
+  already terminal by the time `bulk_cancel_reviews()`/
+  `bulk_submit_decision()` actually reach it (raced by another action,
+  or just stale since selection happened) fails that one item with the
+  same `ValueError` the single-item route would raise, surfaced as a
+  per-item `ok: false` result rather than failing the whole batch.
 - **`review_type` is immutable after creation.** Only `payload` can be
   edited. The edit form disables the review-type `<input>` for this
   reason.
@@ -706,38 +861,44 @@ actual `ssoSessionIdleTimeout` (confirmed live via the Admin API, not
 assumed). Not started; read that file before touching
 `bff/keycloak_session.py`'s session shape or login/logout flow.
 
-## Bulk cancel / approve / reject: planned
+## Bulk cancel / approve / reject: complete
 
 **`docs/BULK_ACTIONS_PLAN.md` has the full design and phased status
-tracker** — lets an Operator select multiple of their own pending
+tracker (all 5 phases done, verified end to end against the real local
+stack)** — lets an Operator select multiple of their own pending
 requests and cancel them in one action, or a Manager select multiple
 pending requests and approve/reject them in one action, each with a
 single shared comment applied to every selected row. Mechanically this
 is **not** a new Temporal-level primitive: every request is still its
 own workflow execution, so a bulk action is N concurrent calls to the
 existing `cancel_review()`/`submit_decision()` in `workflow/service.py`
-(new `bulk_cancel_reviews()`/`bulk_submit_decision()` wrappers, capped at
-50 ids per call), collected into a best-effort, per-item
-`{request_id, ok, error}` result list — not an atomic
+(`bulk_cancel_reviews()`/`bulk_submit_decision()`, capped at 50 ids per
+call via `_validate_bulk_ids()`), collected into a best-effort, per-item
+`BulkActionResult(request_id, ok, error)` list — not an atomic
 all-or-nothing transaction, which isn't meaningful across independent
-workflow executions. New REST endpoints (`POST /reviews/bulk/cancel`,
-`POST /reviews/bulk/decision`) reuse the exact same
-`require_permission`/`check_permission` gates as their single-item
-counterparts. The BFF side adds row checkboxes + a selection toolbar +
-a confirm dialog listing every selected item before executing; the
-non-obvious part is that **selection state lives server-side** (a small
-in-process `dict[username, set[request_id]]` in `bff/ui.py`, same
-"correct without a shared cache, a replica miss just shows unchecked"
-reasoning as `service.py`'s `_query_cache`), not in the browser — every
-row render bakes the correct `checked` state in directly, which is what
-lets the table's existing 5-second self-poll (`outerHTML`-replacing
-`<table id="request-list">`) coexist with checkboxes at all, with zero
-custom selection-tracking JS. Selection clears on a fresh page load and
-after a confirmed bulk action; see that file's "BFF: selection UI"
-section for the full mechanism (including why `hx-vals`'s `js:` prefix
-is required on each checkbox, not optional). Not started; read that file
-before touching `workflow/service.py`'s cancel/decision functions or
-either front door's row/list templates.
+workflow executions. REST endpoints (`POST /reviews/bulk/cancel`,
+`POST /reviews/bulk/decision` — registered *before* the
+`/reviews/{request_id}/...` routes, see `api/routes.py`'s bullet above
+for why) reuse the exact same `require_permission`/`check_permission`
+gates as their single-item counterparts. The BFF side adds row
+checkboxes + a selection toolbar + a confirm dialog listing every
+selected item before executing; the non-obvious part is that
+**selection state lives server-side** (`_bulk_selection: dict[username,
+set[request_id]]` in `bff/ui.py`, same "correct without a shared cache,
+a replica miss just shows unchecked" reasoning as `service.py`'s
+`_query_cache`), not in the browser — every row render bakes the
+correct `checked` state in directly, which is what lets the table's
+existing 5-second self-poll (`outerHTML`-replacing `<table
+id="request-list">`) coexist with checkboxes at all, with zero custom
+selection-tracking JS. Selection clears on a fresh page load and after a
+confirmed bulk action; see `bff/ui.py`'s bullet above for the full
+mechanism (including why `hx-vals`'s `js:` prefix is required on each
+checkbox, not optional, and why the dialog-open routes ended up `POST`
+rather than the `GET` the plan doc originally sketched). Read
+`docs/BULK_ACTIONS_PLAN.md`'s status-tracker note before touching
+`workflow/service.py`'s cancel/decision functions or either front
+door's row/list templates — it records the handful of places the actual
+implementation diverged from the plan's original sketch.
 
 ## Known gaps
 
@@ -843,3 +1004,22 @@ Temporal, worker — up; marked `@pytest.mark.integration`, deselect with
 `pytest -m "not integration"`). No workflow/activity tests yet; when
 adding them, prefer Temporal's `temporalio.testing.WorkflowEnvironment`
 (time-skipping test environment) over hitting a real Temporal server.
+
+Bulk cancel/approve/reject (`docs/BULK_ACTIONS_PLAN.md`) test coverage:
+`tests/unit/test_service_bulk.py` (`_validate_bulk_ids()`'s
+dedup/empty/cap behavior, plus `bulk_cancel_reviews()`/
+`bulk_submit_decision()`'s fan-out/exception-handling, monkeypatching
+`cancel_review()`/`submit_decision()` rather than faking Temporal —
+what's under test there is the orchestration, not the single-item
+functions' own correctness) and, needing the real stack,
+`tests/integration/test_api_bulk.py` (REST bulk endpoints — permission
+gates, empty/over-cap `400`s, mixed eligible/terminal per-item results)
+and `tests/integration/test_bff_bulk.py` (selection isolation between
+users, visibility-invariant filtering, and the full confirm→execute
+flow for both roles). The last one's assertions deliberately check the
+confirm dialog's rendered "N selected" count and `review_type` text
+rather than raw request ids — `_bulk_confirm_dialog.html` never renders
+ids (see that template's `CLAUDE.md` bullet); an early version of these
+tests asserted on ids directly, which failed even though the app
+behavior was correct — a reminder to check what a template actually
+renders before writing an assertion against it.

@@ -1,4 +1,4 @@
-{% macro operator_row(r, permissions=[]) %}
+{% macro operator_row(r, permissions=[], selected_ids=[]) %}
 {% set badge_classes = {
   "pending_review": "bg-amber-100 text-amber-800",
   "approved": "bg-green-100 text-green-800",
@@ -14,7 +14,28 @@
 #}
 {% set can_edit = r.status == "PENDING_REVIEW" and "Update" in permissions %}
 {% set can_cancel = r.status == "PENDING_REVIEW" and "Cancel" in permissions %}
+{#
+  Selection column exists on the page at all whenever Cancel is granted
+  (bulk cancel is the only bulk action available to operators); within
+  that column, a checkbox only renders for rows actually eligible for
+  bulk cancel (PENDING_REVIEW) -- other rows get an empty cell so the
+  column stays aligned. See docs/BULK_ACTIONS_PLAN.md's "BFF: selection
+  UI" for why selection state is baked into the render server-side
+  rather than tracked in client JS.
+#}
+{% set has_select_column = "Cancel" in permissions %}
+{% set can_select = r.status == "PENDING_REVIEW" and has_select_column %}
 <tr id="row-{{ r.id }}">
+  {% if has_select_column %}
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
+    {% if can_select %}
+    <input type="checkbox" name="request_ids" value="{{ r.id }}"
+      {% if r.id in selected_ids %}checked{% endif %}
+      hx-post="/ui/operator/bulk-select" hx-swap="none"
+      hx-vals='js:{"request_ids": ["{{ r.id }}"], "checked": event.target.checked}'>
+    {% endif %}
+  </td>
+  {% endif %}
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ r.review_type }}</td>
   <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
     <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(r.status|lower, 'bg-gray-200 text-gray-700') }}">

@@ -1,0 +1,38 @@
+{#
+  Rendered by the bulk execute routes (bulk-cancel, bulk-decision) after
+  service.bulk_cancel_reviews()/bulk_submit_decision() return their
+  per-item results. Swapped into #dialog-container; the caller appends
+  an OOB-refreshed #request-list table right after this fragment in the
+  same response (see docs/BULK_ACTIONS_PLAN.md's "Results + table
+  refresh") -- that's assembled by the route, not this template, since
+  it's a second, independent template render.
+#}
+{% set succeeded = results | selectattr("ok") | list %}
+{% set failed = results | rejectattr("ok") | list %}
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[480px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">Bulk {{ action }} Results</h2>
+    <p class="text-sm text-gray-700 mb-4">
+      {{ succeeded | length }} succeeded, {{ failed | length }} failed.
+    </p>
+    {% if failed %}
+    <div class="mb-4 max-h-[220px] overflow-y-auto border border-red-200 rounded-md">
+      <table class="w-full border-collapse text-sm">
+        <tbody>
+          {% for r in failed %}
+          <tr class="border-b border-red-100 last:border-b-0">
+            <td class="px-2.5 py-1.5 text-gray-600 whitespace-nowrap">{{ r.request_id }}</td>
+            <td class="px-2.5 py-1.5 text-red-700">{{ r.error }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <div class="flex justify-end mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+    </div>
+  </div>
+</div>

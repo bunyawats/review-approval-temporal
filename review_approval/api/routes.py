@@ -45,6 +45,17 @@ class ReviewSearchRequest(BaseModel):
     filter: Optional[ReviewSearchFilter] = None
 
 
+class BulkCancelRequest(BaseModel):
+    request_ids: list[str]
+    comment: str = ""
+
+
+class BulkDecisionRequest(BaseModel):
+    request_ids: list[str]
+    decision: str  # APPROVED | REJECTED
+    comment: str = ""
+
+
 @router.post("/reviews", status_code=201)
 async def create_review(
     request: Request,
@@ -62,6 +73,65 @@ async def create_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"request_id": request_id, "status": "PENDING_REVIEW"}
+
+
+def _bulk_response(results: list[service.BulkActionResult]) -> dict:
+    return {
+        "results": [
+            {"request_id": r.request_id, "ok": r.ok, "error": r.error} for r in results
+        ],
+        "succeeded": sum(1 for r in results if r.ok),
+        "failed": sum(1 for r in results if not r.ok),
+    }
+
+
+# Registered before the /reviews/{request_id}/... routes below: FastAPI
+# matches path routes in registration order, and "/reviews/bulk/cancel"
+# has the same 3-segment shape as "/reviews/{request_id}/cancel" -- if the
+# parameterized route were registered first, it would swallow this one with
+# request_id="bulk". Same reasoning applies to bulk/decision vs.
+# {request_id}/decision.
+@router.post("/reviews/bulk/cancel")
+async def bulk_cancel_reviews(
+    body: BulkCancelRequest,
+    request: Request,
+    user: dict = Depends(require_permission("Cancel")),
+):
+    try:
+        results = await service.bulk_cancel_reviews(
+            request.app.state.temporal_client,
+            request.app.state.pg_pool,
+            body.request_ids,
+            user["sub"],
+            body.comment,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _bulk_response(results)
+
+
+@router.post("/reviews/bulk/decision")
+async def bulk_submit_decision(
+    body: BulkDecisionRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    # Approve/reject need different permissions -- which one depends on the
+    # request body, same reasoning as the single-item decision route below.
+    permission = "Approve" if body.decision == "APPROVED" else "Reject"
+    await check_permission(user, permission)
+    try:
+        results = await service.bulk_submit_decision(
+            request.app.state.temporal_client,
+            request.app.state.pg_pool,
+            body.request_ids,
+            body.decision,
+            user["sub"],
+            body.comment,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _bulk_response(results)
 
 
 @router.get("/reviews/{request_id}")
