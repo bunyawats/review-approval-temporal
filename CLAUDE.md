@@ -521,19 +521,19 @@ or `bff/` respectively; don't put front-door-specific logic in
   optional: native form-encoding only includes a checkbox's value when
   *checked*, so an unchecking click would otherwise send no
   `request_ids` at all.
-  **Known bug, not yet fixed**: the "select all on this page" header
-  checkbox does not currently work — clicking it neither updates its own
-  visible state nor any row checkbox's. Two fix attempts (an
-  `hx-target="#request-list" hx-swap="outerHTML"` variant of the same
-  declarative pattern, then an `onclick="...htmx.ajax(...)"` variant
-  matching the dialog-confirm-button idiom used elsewhere in this
-  codebase) were both tried and reverted after neither resolved it when
-  tested in a real browser — see git history / conversation record for
-  the reverted attempts if picking this back up. Root cause not yet
-  identified; needs actual browser devtools (console errors, Network
-  tab) to diagnose further, not more server-side reasoning — everything
-  server-side checked out correctly in both attempts via direct HTTP
-  requests against the running app.
+  **Known bug, not yet fixed — redesign planned, not started:**
+  `docs/SELECT_ALL_CHECKBOX_PLAN.md` has the full design (worked out via
+  a conversation brainstorm, no code changes yet) for the "select all on
+  this page" header checkbox, which does not currently work — clicking
+  it neither updates its own visible state nor any row checkbox's. Two
+  earlier fix attempts (documented in that file's "History" section)
+  were tried and reverted; the planned redesign sidesteps rather than
+  resolves their shared root cause by splitting this table into three
+  independently-swappable regions (header row / toolbar fragment /
+  tbody) so the select-all checkbox's target is never its own ancestor.
+  Read that file before touching `_operator_list.html`/
+  `_manager_list.html`/`_operator_row.html`/`_manager_row.html`/the
+  `bulk-select` routes in `bff/ui.py` again.
 - **`bff/templates/_bulk_confirm_dialog.html`, `_bulk_result_dialog.html`**
   — the bulk-action counterparts of `_form_dialog.html`/
   `_cancel_dialog.html`/`_detail_dialog.html`. One shared confirm-dialog
