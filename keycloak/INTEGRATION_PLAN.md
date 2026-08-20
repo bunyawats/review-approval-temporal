@@ -67,6 +67,17 @@
 >       Keycloak integration plan complete** — real login, real
 >       permission checks on every route in both front doors, and a
 >       35-test suite (11 unit + 24 integration) covering it end to end.
+>
+> **Naming note:** Phases 1-3 below (and the "Context" section right
+> after this tracker) refer to the five permissions by their original
+> Phase 1 names -- `Create_Request`, `Update_Request`, `Cancel_Request`,
+> `Approve_Request`, `Reject_Request`, one Resource per action. Those
+> were renamed to plain `Create`/`Update`/`Cancel`/`Approve`/`Reject`
+> when the "Addendum -- Resource+Scope refactor" below collapsed all
+> five into Scopes on a single `RequestApproval` Resource (same
+> permissions, current CLAUDE.md naming). Left as originally written
+> rather than retrofitted, since this file is a historical build log --
+> read the Addendum for what the permissions are actually called today.
 
 ## Context
 
