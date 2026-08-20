@@ -434,13 +434,14 @@ curl -X POST http://localhost:8000/reviews/<request_id>/decision \
   -d '{"decision": "APPROVED", "comment": "Looks good"}'
 ```
 
-Cancel (as the original Operator, comment optional):
+Cancel (as the original Operator, comment optional -- cancelling is just
+another decision on the same endpoint, not a separate route):
 
 ```bash
-curl -X POST http://localhost:8000/reviews/<request_id>/cancel \
+curl -X POST http://localhost:8000/reviews/<request_id>/decision \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"comment": "Submitted by mistake"}'
+  -d '{"decision": "CANCELLED", "comment": "Submitted by mistake"}'
 ```
 
 List with pagination (as either role -- `POST`, not `GET`, so `page`/
