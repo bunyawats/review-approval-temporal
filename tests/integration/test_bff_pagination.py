@@ -16,16 +16,18 @@ this project's existing convention, kept so each integration test file
 reads standalone.
 """
 
+import os
 import re
 import uuid
 from contextlib import contextmanager
 
 import httpx
 import pytest
+import redis.asyncio as redis
 from fastapi.testclient import TestClient
 
 from review_approval.app import app
-from review_approval.workflow import service
+from review_approval.workflow import memory_service, service
 
 pytestmark = pytest.mark.integration
 
@@ -173,6 +175,83 @@ def test_operator_unknown_query_id_falls_back_gracefully(seeded_operator1):
         response = client.post("/ui/operator/list", data={"page": "0", "query_id": str(uuid.uuid4())})
         assert response.status_code == 200
         assert _row_count(response.text) == UI_PAGE_SIZE
+
+
+def test_operator_pagination_falls_back_to_session_memory_on_cross_replica_miss(seeded_operator1, monkeypatch):
+    """Simulates a query_id resolving on a different Kubernetes replica
+    than the one that minted it: workflow/service.py's own in-process
+    _query_cache is a miss, but this session's Redis memory
+    (docs/SESSION_MEMORY_PLAN.md's Phase 3) still has a fresh, matching
+    entry and is used instead of a fresh COUNT(*).
+    """
+    call_count = {"n": 0}
+    real_count = service._count_reviews
+
+    async def counting_count(*args, **kwargs):
+        call_count["n"] += 1
+        return await real_count(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_count_reviews", counting_count)
+
+    with _client_as("operator1") as client:
+        # Empty query_id forces a full recompute -- the only path that
+        # writes this session's pagination memory (see
+        # _remember_pagination()'s "not on every call" design).
+        first = client.post("/ui/operator/list", data={"page": "0", "query_id": ""})
+        assert first.status_code == 200
+        assert call_count["n"] == 1
+        qid = _query_id(first.text)
+        original_summary = _summary(first.text)
+
+        # Simulate landing on a different replica: this query_id's entry
+        # in service.py's own in-process cache is gone, but the session's
+        # own Redis memory (written by the call above) is untouched.
+        service._query_cache.pop(qid, None)
+
+        second = client.post("/ui/operator/list", data={"page": "0", "query_id": qid})
+        assert second.status_code == 200
+        assert call_count["n"] == 1  # no new COUNT(*) -- resolved via session memory
+        assert _summary(second.text) == original_summary
+        assert _query_id(second.text) == qid  # the fallback reuses the same query_id
+
+
+async def test_operator_pagination_fallback_never_trusts_a_foreign_requester(seeded_operator1):
+    """The Redis fallback re-checks filter.requester the same way the
+    client-query_id path already does. In real usage a session's own
+    memory can never actually hold a foreign requester -- it's only ever
+    written by that same session's own recompute, always with its own
+    username (see _remember_pagination()) -- so this test manually
+    corrupts the stored entry to force the scenario, the same "can't
+    really happen, but keep the check honest" defense-in-depth spirit as
+    operator_bulk_decision_form()'s own visibility-invariant re-check.
+    """
+    r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    try:
+        with _client_as("operator2") as client:
+            keys_before = set(await r.keys("ui-memory:*"))
+            # Empty query_id forces a full recompute, populating this
+            # session's own pagination memory with operator2's real filter.
+            first = client.post("/ui/operator/list", data={"page": "0", "query_id": ""})
+            own_summary = _summary(first.text)
+
+            keys_after = set(await r.keys("ui-memory:*"))
+            new_keys = keys_after - keys_before
+            assert len(new_keys) == 1, new_keys
+            session_id = next(iter(new_keys)).removeprefix("ui-memory:")
+
+            memory = await memory_service.SessionMemory.load(r, session_id)
+            assert memory.pagination.filter.get("requester") == "operator2"
+            memory.pagination.filter["requester"] = "operator1"  # corrupt it
+            await memory.save(r, session_id)
+
+            # A query_id service.py's own cache has never seen forces the
+            # fallback tier to run -- it must refuse the poisoned entry
+            # (requester mismatch) and recompute fresh instead of trusting it.
+            attack = client.post("/ui/operator/list", data={"page": "0", "query_id": str(uuid.uuid4())})
+            assert attack.status_code == 200
+            assert _summary(attack.text) == own_summary
+    finally:
+        await r.aclose()
 
 
 # ---------------------------------------------------------------- manager ----

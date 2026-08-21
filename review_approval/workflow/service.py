@@ -85,7 +85,12 @@ async def create_review(
     return request_id
 
 
-_QUERY_CACHE_TTL_S = 30.0
+# Public (not underscore-prefixed) -- reused by bff/ui.py's pagination
+# resilience fallback (docs/SESSION_MEMORY_PLAN.md's Phase 3) as the
+# staleness bound for its own Redis-backed (filter, total) memory, so
+# that fallback and this in-process cache can never silently drift onto
+# two different TTLs.
+QUERY_CACHE_TTL_S = 30.0
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 100
 
@@ -121,7 +126,7 @@ def _cache_get(query_id: str) -> Optional[tuple[dict[str, Optional[str]], int]]:
 
 def _cache_put(filter_: dict[str, Optional[str]], total: int) -> str:
     query_id = str(uuid.uuid4())
-    _query_cache[query_id] = (filter_, total, time.monotonic() + _QUERY_CACHE_TTL_S)
+    _query_cache[query_id] = (filter_, total, time.monotonic() + QUERY_CACHE_TTL_S)
     return query_id
 
 
@@ -156,6 +161,21 @@ async def _fetch_reviews_page(
             *params,
         )
     return [dict(r) for r in rows]
+
+
+async def fetch_reviews_page_only(
+    pool: asyncpg.Pool, filter_: dict[str, Optional[str]], page: int, page_size: int
+) -> list[dict]:
+    """Public wrapper around _fetch_reviews_page() for a caller that
+    already has a known-good, still-fresh (filter, total) pair from its
+    own cache and only needs this page's actual rows -- currently only
+    bff/ui.py's pagination resilience fallback (see
+    docs/SESSION_MEMORY_PLAN.md's Phase 3), reusing this instead of
+    reaching into the underscore-prefixed helper directly. Deliberately
+    does not touch _query_cache or run _count_reviews() -- the caller is
+    the one asserting the total is still trustworthy.
+    """
+    return await _fetch_reviews_page(pool, filter_, page, page_size)
 
 
 async def list_reviews_page(

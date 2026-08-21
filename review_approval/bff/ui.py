@@ -14,7 +14,7 @@ API.
 
 import json
 import os
-from typing import Any
+from typing import Any, Optional
 
 import asyncpg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -253,12 +253,73 @@ async def logout_submit(request: Request):
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
-async def _resolve_operator_page(pool: asyncpg.Pool, user: dict, page: int, query_id: str) -> service.PagedReviews:
+async def _pagination_fallback(
+    request: Request, pool: asyncpg.Pool, page: int, owner_username: Optional[str]
+) -> Optional[service.PagedReviews]:
+    """Tier 2 of the pagination resilience fallback (see
+    docs/SESSION_MEMORY_PLAN.md's Phase 3): recover (filter, total) from
+    this session's own Redis memory when the client's query_id didn't
+    resolve via service.py's own in-process cache -- unknown/expired,
+    possibly because it landed on a different Kubernetes replica than the
+    one that minted it. Never authoritative over which page to render;
+    only ever consulted after the client's own query_id has already
+    failed to resolve. Returns None if there's nothing usable to fall
+    back to, in which case the caller recomputes from scratch exactly as
+    it always has.
+
+    owner_username, when given (operator screens only -- managers have no
+    requester filter to check), must match the cached filter's requester,
+    the same ownership check the client-query_id path already performs --
+    this fallback must not be able to leak one operator's cached filter
+    to a different one.
+    """
+    try:
+        memory = await memory_service.SessionMemory.load(request.app.state.redis, request.session[SESSION_KEY])
+    except RedisError:
+        return None
+    pagination = memory.pagination
+    if pagination is None or pagination.is_stale(service.QUERY_CACHE_TTL_S):
+        return None
+    if owner_username is not None and pagination.filter.get("requester") != owner_username:
+        return None
+    items = await service.fetch_reviews_page_only(pool, pagination.filter, page, _UI_PAGE_SIZE)
+    return service.PagedReviews(
+        query_id=pagination.query_id,
+        page=page,
+        page_size=_UI_PAGE_SIZE,
+        filter=pagination.filter,
+        total=pagination.total,
+        items=items,
+    )
+
+
+async def _remember_pagination(request: Request, paged: service.PagedReviews) -> None:
+    """Tier-3 write-back, called only when a genuinely new query was just
+    minted (a full recompute happened) -- deliberately not called on
+    every request, so the common case (client's query_id already
+    resolves via service.py's cache) adds zero Redis traffic. See
+    docs/SESSION_MEMORY_PLAN.md's Phase 3 "Design, write side".
+    """
+    r = request.app.state.redis
+    session_id = request.session[SESSION_KEY]
+    try:
+        memory = await memory_service.SessionMemory.load(r, session_id)
+        memory.set_pagination(paged.query_id, paged.filter, paged.total)
+        await memory.save(r, session_id)
+    except RedisError:
+        pass
+
+
+async def _resolve_operator_page(
+    request: Request, pool: asyncpg.Pool, user: dict, page: int, query_id: str
+) -> service.PagedReviews:
     """Shared by operator_list() and the bulk-decision execute route (both
     need to re-render the same list page a user was already on) -- see
     operator_list()'s own docstring-length comment for why the cached
     filter's requester has to be re-checked against this session before
-    it's trusted.
+    it's trusted. Falls back to this session's own Redis memory
+    (_pagination_fallback()) before a full recompute -- see that
+    function's docstring.
     """
     page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
     if query_id:
@@ -268,9 +329,14 @@ async def _resolve_operator_page(pool: asyncpg.Pool, user: dict, page: int, quer
             candidate = None
         if candidate is not None and candidate.filter.get("requester") == user["username"]:
             return candidate
-    return await service.list_reviews_page(
+        fallback = await _pagination_fallback(request, pool, page, owner_username=user["username"])
+        if fallback is not None:
+            return fallback
+    resolved = await service.list_reviews_page(
         pool, page=page, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]}
     )
+    await _remember_pagination(request, resolved)
+    return resolved
 
 
 # ------------------------------------------------------------- operator ----
@@ -326,7 +392,7 @@ async def operator_list(
     # which lives outside #request-list and wouldn't otherwise pick up
     # the new page/query_id baked into its Bulk-action button(s).
     _, pool = _clients(request)
-    paged = await _resolve_operator_page(pool, user, page, query_id)
+    paged = await _resolve_operator_page(request, pool, user, page, query_id)
     permissions = await _user_permissions(user)
     # Must NOT clear selection, only reflect current state.
     selected_ids = await _get_selection(request)
@@ -352,7 +418,7 @@ async def operator_rows(
     # operator_list(); doesn't touch selection or the toolbar, since
     # polling alone never changes either.
     _, pool = _clients(request)
-    paged = await _resolve_operator_page(pool, user, page, query_id)
+    paged = await _resolve_operator_page(request, pool, user, page, query_id)
     permissions = await _user_permissions(user)
     selected_ids = await _get_selection(request)
     return _render(
@@ -407,7 +473,7 @@ async def operator_bulk_select(
     # branching on which checkbox triggered it, same philosophy as the
     # original selection design.
     _, pool = _clients(request)
-    paged = await _resolve_operator_page(pool, user, page, query_id)
+    paged = await _resolve_operator_page(request, pool, user, page, query_id)
     permissions = await _user_permissions(user)
     rows_html = templates.get_template("_operator_rows.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
@@ -677,7 +743,7 @@ async def operator_bulk_decision_execute(
     # (someone else acted on it) -- fine, that's exactly the best-effort,
     # per-item-results semantics; bulk_submit_decision() already reflects it.
     await _clear_selection(request)
-    paged = await _resolve_operator_page(pool, user, page, query_id)
+    paged = await _resolve_operator_page(request, pool, user, page, query_id)
     permissions = await _user_permissions(user)
     selected_ids = await _get_selection(request)  # empty -- just cleared
     return _bulk_result_response(
@@ -689,15 +755,25 @@ async def operator_bulk_decision_execute(
     )
 
 
-async def _resolve_manager_page(pool: asyncpg.Pool, page: int, query_id: str) -> service.PagedReviews:
+async def _resolve_manager_page(request: Request, pool: asyncpg.Pool, page: int, query_id: str) -> service.PagedReviews:
     """Shared by manager_list() and the bulk-decision execute route -- see
     manager_list()'s own comment for the count-cache/fallback reasoning.
+    Falls back to this session's own Redis memory
+    (_pagination_fallback()) before a full recompute -- see that
+    function's docstring. No ownership check needed (owner_username=None)
+    -- managers have no requester filter to begin with.
     """
     page = max(page, 0)  # Prev is disabled at page 0; clamp against tampering
-    try:
-        return await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id or None)
-    except ValueError:
-        return await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE)
+    if query_id:
+        try:
+            return await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE, query_id=query_id)
+        except ValueError:
+            fallback = await _pagination_fallback(request, pool, page, owner_username=None)
+            if fallback is not None:
+                return fallback
+    resolved = await service.list_reviews_page(pool, page=page, page_size=_UI_PAGE_SIZE)
+    await _remember_pagination(request, resolved)
+    return resolved
 
 
 # -------------------------------------------------------------- manager ----
@@ -747,7 +823,7 @@ async def manager_list(
     # toolbar fragment, which lives outside #request-list and wouldn't
     # otherwise pick up the new page/query_id.
     _, pool = _clients(request)
-    paged = await _resolve_manager_page(pool, page, query_id)
+    paged = await _resolve_manager_page(request, pool, page, query_id)
     permissions = await _user_permissions(user)
     # Must NOT clear selection, only reflect current state.
     selected_ids = await _get_selection(request)
@@ -768,7 +844,7 @@ async def manager_rows(
     # The periodic 5s self-poll's own target -- see operator_rows()'s
     # comment and docs/SELECT_ALL_CHECKBOX_PLAN.md.
     _, pool = _clients(request)
-    paged = await _resolve_manager_page(pool, page, query_id)
+    paged = await _resolve_manager_page(request, pool, page, query_id)
     permissions = await _user_permissions(user)
     selected_ids = await _get_selection(request)
     return _render(
@@ -796,7 +872,7 @@ async def manager_bulk_select(
     # used only by the select-all checkbox's own request) + OOB toolbar
     # update (used by both), one route serving both cases.
     _, pool = _clients(request)
-    paged = await _resolve_manager_page(pool, page, query_id)
+    paged = await _resolve_manager_page(request, pool, page, query_id)
     permissions = await _user_permissions(user)
     rows_html = templates.get_template("_manager_rows.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
@@ -884,7 +960,7 @@ async def bulk_decision_execute(
             headers=_RETARGET_DIALOG_HEADERS,
         )
     await _clear_selection(request)
-    paged = await _resolve_manager_page(pool, page, query_id)
+    paged = await _resolve_manager_page(request, pool, page, query_id)
     permissions = await _user_permissions(user)
     selected_ids = await _get_selection(request)  # empty -- just cleared
     return _bulk_result_response(

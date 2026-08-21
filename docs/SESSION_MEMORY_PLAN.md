@@ -11,7 +11,7 @@
 >       other behavior change yet
 > - [x] Phase 2 — bulk selection moves from `bff/ui.py`'s in-process
 >       `_bulk_selection` dict to `SessionMemory`
-> - [ ] Phase 3 — pagination resilience fallback: `_resolve_operator_page()`/
+> - [x] Phase 3 — pagination resilience fallback: `_resolve_operator_page()`/
 >       `_resolve_manager_page()` consult session memory as a last-resort
 >       tier before recomputing from scratch, and refresh it whenever they
 >       mint a genuinely new query
@@ -376,6 +376,42 @@ resolved page's `total` matches the memory's cached value and no
 `COUNT(*)` was re-run (e.g. by asserting on Postgres query count via a
 lightweight instrumentation, or simply by asserting correctness under a
 monkeypatched `_count_reviews` that fails the test if called).
+
+**Implemented as described, with two small additions found necessary
+along the way**:
+- `workflow/service.py` gained two small public additions rather than
+  `bff/ui.py` reaching into underscore-prefixed names across the module
+  boundary: `_QUERY_CACHE_TTL_S` renamed to `QUERY_CACHE_TTL_S` (dropped
+  the underscore — it's genuinely meant to be shared now, and
+  redeclaring the same number in `bff/ui.py` would risk exactly the kind
+  of silent-drift bug `SESSION_TTL_SECONDS`'s Phase 1 reasoning already
+  called out), and a new `fetch_reviews_page_only(pool, filter_, page,
+  page_size)` — a thin public wrapper around the existing private
+  `_fetch_reviews_page()`, since the fallback tier needs actual row data
+  for a `(filter, total)` pair it already trusts, without re-running
+  `_count_reviews()` or touching `_query_cache` at all.
+- Two new helpers in `bff/ui.py`, `_pagination_fallback()` (tier 2) and
+  `_remember_pagination()` (tier-3 write-back), shared by both
+  `_resolve_operator_page()` and `_resolve_manager_page()` rather than
+  duplicating the logic in each (the two differ only in whether an
+  `owner_username` ownership check applies).
+- Test coverage went one test further than the bullet above literally
+  asked for: alongside the cross-replica-miss case
+  (`test_operator_pagination_falls_back_to_session_memory_on_cross_replica_miss`),
+  added
+  `test_operator_pagination_fallback_never_trusts_a_foreign_requester`,
+  which manually corrupts a session's own stored `pagination.filter` to
+  force the ownership-mismatch branch in `_pagination_fallback()` to
+  actually execute — an earlier draft of this test only checked that a
+  *different* session presented with someone else's `query_id` didn't
+  leak data, which turned out to pass for an unrelated reason (that
+  session's own memory was simply empty) without ever reaching the
+  ownership-check line at all. Landed as:
+  `review_approval/workflow/service.py` (rename + new wrapper),
+  `review_approval/bff/ui.py` (`_pagination_fallback()`,
+  `_remember_pagination()`, both `_resolve_*_page()` functions take
+  `request` now), `tests/integration/test_bff_pagination.py` (2 new
+  tests). 114/114 tests pass.
 
 ## Phase 4 — Tests + docs
 
