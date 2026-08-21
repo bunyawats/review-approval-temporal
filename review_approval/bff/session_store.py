@@ -13,6 +13,13 @@ the key's expiry back out to SESSION_TTL_SECONDS, so "session lasts 30
 minutes" tracks 30 minutes of *inactivity* -- matching this realm's
 ssoSessionIdleTimeout (confirmed live against the running Keycloak
 instance, see docs/SESSION_STORE_PLAN.md's "Context" section).
+
+SESSION_TTL_SECONDS itself is defined in workflow/memory_service.py, not
+here, even though this module is its "real" meaning (the auth session's
+idle timeout) -- workflow/ must never import from bff/, so the shared
+constant has to live at that lower layer for this module to import
+upward from, same direction every other workflow/->bff/ dependency
+already runs. See that module's docstring for the full reasoning.
 """
 
 import json
@@ -20,7 +27,8 @@ import secrets
 
 import redis.asyncio as redis
 
-SESSION_TTL_SECONDS = 1800
+from review_approval.workflow.memory_service import SESSION_TTL_SECONDS
+
 _KEY_PREFIX = "ui-session:"
 
 

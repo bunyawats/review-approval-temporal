@@ -5,7 +5,7 @@
 > (same convention as `docs/SESSION_STORE_PLAN.md`,
 > `docs/PAGINATION_PLAN.md`, `keycloak/INTEGRATION_PLAN.md`).
 >
-> - [ ] Phase 1 — `workflow/memory_service.py` (new module: the
+> - [x] Phase 1 — `workflow/memory_service.py` (new module: the
 >       `SessionMemory` class + Redis interaction against `ui-memory:<id>`),
 >       wired into `bff/keycloak_session.py`'s `logout()` cleanup, no
 >       other behavior change yet
@@ -218,6 +218,25 @@ same shape as `docs/SESSION_STORE_PLAN.md`'s own Phase 1.
 round-trips including a populated `pagination`, `.load()` on an unknown
 id returns a fresh empty `SessionMemory()` — not `None`, and not an
 exception) — same convention as `docs/SESSION_STORE_PLAN.md`'s Phase 1.
+
+**Implemented as described, with one resolved deviation**: the
+`SESSION_TTL_SECONDS` sourcing question this section flagged as "deferred
+until Phase 1 shows which direction reads better" is resolved in favor
+of the constant living in `workflow/memory_service.py` as the canonical
+source — `bff/session_store.py` now imports it from there instead of
+declaring its own copy. This keeps the one-way `workflow/` → never
+`bff/` dependency rule intact (the "one deliberate exception" framing
+above turned out to be avoidable, not actually needed) at the cost of
+the constant's "true" meaning (the auth session's idle timeout) living
+one layer away from the module that owns that concept — judged a smaller
+cost than bending the architecture rule. Landed as:
+`review_approval/workflow/memory_service.py` (new),
+`review_approval/bff/session_store.py` (one-line import change),
+`review_approval/bff/keycloak_session.py` (`logout()` also deletes
+`ui-memory:<id>`), `tests/unit/test_memory_service.py` (pure
+serialization/mutation-helper logic, no live services),
+`tests/integration/test_memory_service.py` (real-Redis round trip +
+confirms `logout()` clears both blobs). 111/111 tests pass.
 
 ## Phase 2 — Bulk selection moves to SessionMemory
 

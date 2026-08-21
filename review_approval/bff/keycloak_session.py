@@ -55,7 +55,7 @@ from fastapi import HTTPException, Request
 from redis.exceptions import RedisError
 
 from review_approval.bff import session_store
-from review_approval.workflow import keycloak_auth
+from review_approval.workflow import keycloak_auth, memory_service
 
 SESSION_KEY = "user"
 _STATE_KEY = "oauth_state"
@@ -205,13 +205,20 @@ def logout_redirect_url(request: Request) -> str:
 async def logout(request: Request) -> None:
     session_id = request.session.pop(SESSION_KEY, None)
     if session_id:
+        r = request.app.state.redis
         try:
-            await session_store.delete(request.app.state.redis, session_id)
+            await session_store.delete(r, session_id)
         except RedisError:
             # Cookie is already cleared, which is what actually ends the
             # browser's session; a stray Redis entry left behind just
             # expires on its own TTL (SESSION_TTL_SECONDS) rather than
             # needing this call to succeed.
+            pass
+        try:
+            await memory_service.SessionMemory.delete(r, session_id)
+        except RedisError:
+            # Same reasoning as above -- a stray ui-memory:<id> entry is
+            # harmless, it just expires on its own TTL.
             pass
 
 
