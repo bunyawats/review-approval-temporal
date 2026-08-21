@@ -213,7 +213,7 @@
 
 <figure>
   <div class="diagram-scroll">
-    <svg class="arch" viewBox="0 0 1240 970" role="img" aria-label="Architecture diagram: a browser or REST client authenticates against Keycloak, then calls bff/ui.py or api/routes.py inside one FastAPI process. Both routers call workflow/service.py, which either reads Postgres directly or signals Temporal Server. Temporal dispatches to per-review-type task queues; a worker-workflow process executes the workflow and a worker-activity process executes persist_* activities that write to Postgres. service.py polls Postgres in a bounded loop until that asynchronous write becomes visible before returning to the caller.">
+    <svg class="arch" viewBox="0 0 1240 970" role="img" aria-label="Architecture diagram: a browser or REST client authenticates against Keycloak, then calls bff/ui.py or api/routes.py inside one FastAPI process. Both routers call workflow/service.py, which either reads Postgres directly or signals Temporal Server. Temporal dispatches to per-review-type task queues; a worker-workflow process executes the workflow and a worker-activity process executes persist_* activities that write to Postgres. service.py polls Postgres in a bounded loop until that asynchronous write becomes visible before returning to the caller. Separately, bff/ui.py talks directly to Redis (not through workflow/service.py) to read and write the /ui/* login session, bulk-selection state, and a pagination resilience fallback -- api/routes.py never touches Redis at all.">
 
       <defs>
         <marker id="arrow-sync" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -251,8 +251,8 @@
       <text x="1040" y="142" text-anchor="middle" class="label-sub">not a role claim on the JWT itself</text>
 
       <!-- browser -> keycloak (login redirect) -->
-      <path d="M320,50 L900,80" fill="none" stroke="var(--accent-auth)" stroke-width="1.4" stroke-dasharray="1,4" stroke-linecap="round" marker-end="url(#arrow-auth)"/>
-      <text x="590" y="45" text-anchor="middle" class="edge-label">Authorization Code login redirect</text>
+      <path d="M320,90 L620,116 L900,100" fill="none" stroke="var(--accent-auth)" stroke-width="1.4" stroke-dasharray="1,4" stroke-linecap="round" marker-end="url(#arrow-auth)"/>
+      <text x="620" y="132" text-anchor="middle" class="edge-label">Authorization Code login redirect</text>
 
       <!-- fastapi boundary -> keycloak (token / uma exchange) -->
       <path d="M840,300 L900,140" fill="none" stroke="var(--accent-auth)" stroke-width="1.4" stroke-dasharray="1,4" stroke-linecap="round" marker-end="url(#arrow-auth)"/>
@@ -296,6 +296,16 @@
       <text x="660" y="534" text-anchor="middle" class="label-sub">workflow id: review-{request_id}</text>
       <text x="660" y="550" text-anchor="middle" class="label-sub">source of truth for live state</text>
 
+      <!-- ===== redis ===== -->
+      <rect x="900" y="470" width="280" height="100" rx="8" fill="var(--surface)" stroke="var(--line-strong)" stroke-width="1.5"/>
+      <text x="1040" y="500" text-anchor="middle" class="label-title">Redis</text>
+      <text x="1040" y="518" text-anchor="middle" class="label-sub">ui-session:&lt;id&gt; / ui-memory:&lt;id&gt;</text>
+      <text x="1040" y="534" text-anchor="middle" class="label-sub">bff/ui.py only — not used by api/</text>
+      <text x="1040" y="550" text-anchor="middle" class="label-sub">sliding TTL, 30 min idle</text>
+
+      <path d="M190,262 L190,420 L1040,420 L1040,470" fill="none" stroke="var(--accent-sync)" stroke-width="1.6" marker-end="url(#arrow-sync)"/>
+      <text x="970" y="413" text-anchor="middle" class="edge-label">session get/set (Redis)</text>
+
       <path d="M355,388 L355,411 L220,411 L220,470" fill="none" stroke="var(--accent-sync)" stroke-width="1.6" marker-end="url(#arrow-sync)"/>
       <text x="290" y="404" text-anchor="middle" class="edge-label">read: list_reviews / get_review</text>
 
@@ -332,8 +342,8 @@
       <text x="700" y="720" text-anchor="middle" class="edge-label">poll (both worker modes)</text>
 
       <!-- async write loop back to postgres -->
-      <path d="M740,830 L20,830 L20,570" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
-      <text x="380" y="822" text-anchor="middle" class="edge-label">persist_request / persist_decision / persist_update</text>
+      <path d="M830,860 L830,900 L20,900 L20,570" fill="none" stroke="var(--accent-async)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrow-async)"/>
+      <text x="425" y="893" text-anchor="middle" class="edge-label">persist_request / persist_decision / persist_update</text>
 
     </svg>
   </div>
@@ -375,6 +385,10 @@
     <div class="note">
       <dt>Keycloak</dt>
       <dd><code>Operator</code>/<code>Manager</code> are plain realm roles, gating which screen a session can see. The five mutating actions are Resources, not roles — checking one always costs a live UMA call, by design; there is no permission-result caching yet.</dd>
+    </div>
+    <div class="note">
+      <dt>Redis</dt>
+      <dd>Server-side store for <code>/ui/*</code> only, called directly by <code>bff/ui.py</code>/<code>bff/keycloak_session.py</code> — never through <code>workflow/service.py</code>, and never touched by <code>api/routes.py</code>. <code>ui-session:&lt;id&gt;</code> holds the login (tokens + transparent refresh); the separate <code>ui-memory:&lt;id&gt;</code> holds bulk-selection state and a pagination resilience fallback (<code>workflow/memory_service.py</code>'s <code>SessionMemory</code>). Both expire on the same sliding 30-minute idle TTL and are deleted together on logout.</dd>
     </div>
   </dl>
 </section>
