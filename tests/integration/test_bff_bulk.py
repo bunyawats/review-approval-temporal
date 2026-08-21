@@ -17,11 +17,13 @@ docstring for why two TestClients for the same `app` singleton must
 never be open at once.
 """
 
+import os
 import re
 from contextlib import contextmanager
 
 import httpx
 import pytest
+import redis.asyncio as redis
 from fastapi.testclient import TestClient
 
 from review_approval.app import app
@@ -124,9 +126,10 @@ def _confirm_dialog_count(dialog_text: str) -> int:
 # --------------------------------------------------------------- selection ----
 
 def test_bulk_select_only_mutates_own_selection():
-    # Two logged-in operators selecting concurrently never see or clear
-    # each other's selections -- _bulk_selection is keyed by username and
-    # bulk_select() only ever touches the caller's own entry.
+    # Two concurrently logged-in operators never see or clear each other's
+    # selections -- SessionMemory is keyed by session id (see
+    # docs/SESSION_MEMORY_PLAN.md), and _update_selection() only ever
+    # touches the caller's own entry.
     with _client_as("operator1") as op1:
         op1.get("/ui/operator")  # fresh load: clear any state left by other tests
         id1 = _create_as(op1, vendor="op1-item")
@@ -134,10 +137,14 @@ def test_bulk_select_only_mutates_own_selection():
         dialog = op1.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(dialog.text) == 1
 
+        # Still there on a later request in the SAME session -- selection
+        # survives across requests, not just within the one that set it.
+        dialog_again = op1.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
+        assert _confirm_dialog_count(dialog_again.text) == 1
+
     with _client_as("operator2") as op2:
         # operator2 never selected anything -- if operator1's selection had
-        # somehow leaked across the shared _bulk_selection dict, this would
-        # show a nonzero count.
+        # somehow leaked across sessions, this would show a nonzero count.
         op2.get("/ui/operator")
         leaked = op2.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
         assert _confirm_dialog_count(leaked.text) == 0
@@ -150,8 +157,44 @@ def test_bulk_select_only_mutates_own_selection():
         assert _confirm_dialog_count(dialog2.text) == 1
 
     with _client_as("operator1") as op1_again:
-        dialog_again = op1_again.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
-        assert _confirm_dialog_count(dialog_again.text) == 1
+        # A genuinely NEW login mints a fresh session id, so it starts
+        # with an empty selection even though it's the same human as the
+        # first block -- a deliberate consequence of moving selection to
+        # be keyed by session id rather than username (two separate
+        # logins no longer silently share state; see
+        # docs/SESSION_MEMORY_PLAN.md's "Context" section). Two tabs in
+        # the SAME browser session would still share the cookie, and
+        # therefore the selection, unlike this fresh-TestClient case.
+        dialog_fresh_session = op1_again.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
+        assert _confirm_dialog_count(dialog_fresh_session.text) == 0
+
+
+async def test_selection_survives_missing_ui_memory_entry_gracefully():
+    # If this session's ui-memory:<id> entry is deleted out from under it
+    # (Redis restart, eviction, or -- as simulated here -- a direct
+    # delete), the selection UI degrades to "nothing selected" rather
+    # than erroring (see docs/SESSION_MEMORY_PLAN.md's Phase 2
+    # RedisError handling -- fail closed, don't 500).
+    r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    try:
+        with _client_as("operator1") as op1:
+            keys_before = set(await r.keys("ui-memory:*"))
+            op1.get("/ui/operator")  # fresh load: clears selection, writing a ui-memory:<id> entry
+            id1 = _create_as(op1, vendor="op1-item")
+            _select(op1, "operator", [id1])
+
+            keys_after = set(await r.keys("ui-memory:*"))
+            new_keys = keys_after - keys_before
+            assert len(new_keys) == 1, new_keys
+            memory_key = next(iter(new_keys))
+
+            await r.delete(memory_key)
+
+            dialog = op1.post("/ui/operator/bulk-decision-form", data={"page": 0, "query_id": ""})
+            assert dialog.status_code == 200
+            assert _confirm_dialog_count(dialog.text) == 0
+    finally:
+        await r.aclose()
 
 
 def test_unchecking_removes_from_selection():

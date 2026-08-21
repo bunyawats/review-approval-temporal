@@ -20,8 +20,10 @@ import asyncpg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from redis.exceptions import RedisError
 
 from review_approval.bff.keycloak_session import (
+    SESSION_KEY,
     build_authorize_url,
     check_permission,
     complete_login,
@@ -31,7 +33,7 @@ from review_approval.bff.keycloak_session import (
     require_permission,
     require_session_role,
 )
-from review_approval.workflow import keycloak_auth, service
+from review_approval.workflow import keycloak_auth, memory_service, service
 from review_approval.workflow.schemas import REVIEW_TYPE_SCHEMAS, SAMPLE_PAYLOADS
 
 router = APIRouter(prefix="/ui", tags=["Web UI"])
@@ -47,22 +49,67 @@ templates = Jinja2Templates(
 # consistent with what's actually rendered.
 _UI_PAGE_SIZE = 10
 
-# username -> set of selected request_ids, for the bulk cancel/approve/reject
-# selection UI (see docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI"). In-
-# process only, deliberately -- same "correct without a shared cache, a
-# replica miss just shows unchecked, never wrong data" reasoning as
-# service.py's _query_cache. If/when docs/SESSION_STORE_PLAN.md's Redis
-# session store lands, this can move there for free; _get_selection()/
-# _clear_selection() stay the seam, only their bodies would change.
-_bulk_selection: dict[str, set[str]] = {}
+# Bulk cancel/approve/reject selection UI state (see
+# docs/BULK_ACTIONS_PLAN.md's "BFF: selection UI") lives in Redis via
+# workflow/memory_service.py's SessionMemory, keyed by this session's own
+# id -- see docs/SESSION_MEMORY_PLAN.md for the full design and why it's
+# scoped to session id rather than username (this used to be an
+# in-process `dict[username, set[str]]`; the seam these two functions
+# formed is exactly what let that move happen without touching any call
+# site's call shape beyond adding `await`/passing `request`).
 
 
-def _get_selection(username: str) -> set[str]:
-    return _bulk_selection.setdefault(username, set())
+async def _get_selection(request: Request) -> set[str]:
+    """Read-only view of this session's current bulk selection."""
+    try:
+        memory = await memory_service.SessionMemory.load(request.app.state.redis, request.session[SESSION_KEY])
+    except RedisError:
+        # Fail closed to "nothing selected" -- same "a replica miss just
+        # shows unchecked, never wrong data" reasoning this used to lean
+        # on as an in-process cache; a flaky Redis shouldn't surface as
+        # incorrect selection state.
+        return set()
+    return set(memory.bulk_selection)
 
 
-def _clear_selection(username: str) -> None:
-    _bulk_selection.pop(username, None)
+async def _clear_selection(request: Request) -> None:
+    r = request.app.state.redis
+    session_id = request.session[SESSION_KEY]
+    try:
+        memory = await memory_service.SessionMemory.load(r, session_id)
+        memory.clear_selection()
+        await memory.save(r, session_id)
+    except RedisError:
+        # Callers are a fresh page load or a just-confirmed bulk action --
+        # both already behave correctly client-side regardless; a failed
+        # persist here just risks a stale selection lingering server-side
+        # until the next successful write, not a failed request.
+        pass
+
+
+async def _update_selection(request: Request, ids: list[str], checked: bool) -> set[str]:
+    """Add/remove `ids` from this session's selection and persist the
+    result, returning the new selection. Used by the per-row/select-all
+    checkbox routes, which need to mutate rather than just read.
+    """
+    r = request.app.state.redis
+    session_id = request.session[SESSION_KEY]
+    try:
+        memory = await memory_service.SessionMemory.load(r, session_id)
+    except RedisError:
+        return set()
+    for request_id in ids:
+        (memory.select if checked else memory.deselect)(request_id)
+    try:
+        await memory.save(r, session_id)
+    except RedisError:
+        # The checkbox's own checked/unchecked state is already correct
+        # client-side the instant it's clicked (see
+        # docs/SELECT_ALL_CHECKBOX_PLAN.md) -- a failed persist just means
+        # the next poll might not reflect it, not that this request
+        # should fail.
+        pass
+    return set(memory.bulk_selection)
 
 
 def _clients(request: Request):
@@ -232,11 +279,11 @@ async def _resolve_operator_page(pool: asyncpg.Pool, user: dict, page: int, quer
 async def operator_page(request: Request, user: dict = Depends(require_session_role("operator"))):
     # A fresh navigation/reload clears any stale selection from a previous
     # visit -- see docs/BULK_ACTIONS_PLAN.md's "Clearing selection".
-    _clear_selection(user["username"])
+    await _clear_selection(request)
     _, pool = _clients(request)
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     return _render(
         request,
         "operator.html",
@@ -282,7 +329,7 @@ async def operator_list(
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
     # Must NOT clear selection, only reflect current state.
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     table_html = templates.get_template("_operator_list.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
     )
@@ -307,7 +354,7 @@ async def operator_rows(
     _, pool = _clients(request)
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     return _render(
         request,
         "_operator_rows.html",
@@ -349,8 +396,7 @@ async def operator_bulk_select(
     # "selected" has no side effect beyond what's rendered back to this same
     # user, so it doesn't need the heavier permission check. The real
     # enforcement point is cancel_review(), invoked from the execute route.
-    sel = _get_selection(user["username"])
-    (sel.update if checked else sel.difference_update)(ids)
+    selected_ids = await _update_selection(request, ids, checked)
     # Every bulk-select response carries two independent fragments (see
     # docs/SELECT_ALL_CHECKBOX_PLAN.md): the current page's rows, wrapped
     # for <table> parsing safety -- meaningfully used as the primary swap
@@ -363,7 +409,6 @@ async def operator_bulk_select(
     _, pool = _clients(request)
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
     rows_html = templates.get_template("_operator_rows.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
     )
@@ -426,7 +471,7 @@ async def create_request(
     # New requests sort first (created_at DESC) -- page 0 always shows it.
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE, filter={"requester": user["username"]})
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     list_html = templates.get_template("_operator_list.html").render(
         {
             "request": request,
@@ -566,13 +611,14 @@ async def operator_bulk_decision_form(
     # docs/MERGE_CANCEL_DECISION_PLAN.md). decision is hardcoded
     # CANCELLED, same reasoning as operator_decision() above.
     _, pool = _clients(request)
-    ids = _get_selection(user["username"])
+    ids = await _get_selection(request)
     items = await service.get_reviews(pool, list(ids))
     # Defense in depth for the visibility invariant, same principle as
     # every other operator route (see CLAUDE.md's "Visibility" invariant)
-    # -- _bulk_selection[username] should never actually contain another
-    # user's id, since bulk_select() only ever mutates the caller's own
-    # entry, but this keeps the preview honest regardless.
+    # -- this session's own SessionMemory should never actually contain
+    # another user's id, since it's keyed by this session's own id and
+    # _update_selection() only ever mutates the caller's own entry, but
+    # this keeps the preview honest regardless.
     items = [r for r in items if r["requester"] == user["username"]]
     return _render(
         request,
@@ -601,7 +647,7 @@ async def operator_bulk_decision_execute(
     # CANCELLED, never read from the request body, same reasoning as
     # operator_decision() above.
     client, pool = _clients(request)
-    ids = _get_selection(user["username"])
+    ids = await _get_selection(request)
     try:
         results = await service.bulk_submit_decision(client, pool, list(ids), "CANCELLED", user["username"], comment)
     except ValueError as e:
@@ -630,10 +676,10 @@ async def operator_bulk_decision_execute(
     # An id can legitimately go stale between selection and this point
     # (someone else acted on it) -- fine, that's exactly the best-effort,
     # per-item-results semantics; bulk_submit_decision() already reflects it.
-    _clear_selection(user["username"])
+    await _clear_selection(request)
     paged = await _resolve_operator_page(pool, user, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])  # empty -- just cleared
+    selected_ids = await _get_selection(request)  # empty -- just cleared
     return _bulk_result_response(
         request,
         "Cancel",
@@ -660,11 +706,11 @@ async def _resolve_manager_page(pool: asyncpg.Pool, page: int, query_id: str) ->
 async def manager_page(request: Request, user: dict = Depends(require_session_role("manager"))):
     # A fresh navigation/reload clears any stale selection from a previous
     # visit -- see docs/BULK_ACTIONS_PLAN.md's "Clearing selection".
-    _clear_selection(user["username"])
+    await _clear_selection(request)
     _, pool = _clients(request)
     paged = await service.list_reviews_page(pool, page_size=_UI_PAGE_SIZE)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     return _render(
         request,
         "manager.html",
@@ -704,7 +750,7 @@ async def manager_list(
     paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
     # Must NOT clear selection, only reflect current state.
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     table_html = templates.get_template("_manager_list.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
     )
@@ -724,7 +770,7 @@ async def manager_rows(
     _, pool = _clients(request)
     paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
+    selected_ids = await _get_selection(request)
     return _render(
         request,
         "_manager_rows.html",
@@ -744,8 +790,7 @@ async def manager_bulk_select(
     # See operator_bulk_select()'s comment for why this is a single
     # comma-joined string, not repeated form fields.
     ids = [i for i in request_ids.split(",") if i]
-    sel = _get_selection(user["username"])
-    (sel.update if checked else sel.difference_update)(ids)
+    selected_ids = await _update_selection(request, ids, checked)
     # See operator_bulk_select()'s comment and
     # docs/SELECT_ALL_CHECKBOX_PLAN.md -- rows fragment (meaningfully
     # used only by the select-all checkbox's own request) + OOB toolbar
@@ -753,7 +798,6 @@ async def manager_bulk_select(
     _, pool = _clients(request)
     paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])
     rows_html = templates.get_template("_manager_rows.html").render(
         {"request": request, "paged": paged, "permissions": permissions, "selected_ids": selected_ids}
     )
@@ -776,7 +820,7 @@ async def bulk_decision_form(
     permission = "Approve" if decision == "APPROVED" else "Reject"
     await check_permission(user, permission)
     _, pool = _clients(request)
-    ids = _get_selection(user["username"])
+    ids = await _get_selection(request)
     items = await service.get_reviews(pool, list(ids))
     # No visibility filter needed here -- managers see everything.
     return _render(
@@ -813,7 +857,7 @@ async def bulk_decision_execute(
     permission = "Approve" if decision == "APPROVED" else "Reject"
     await check_permission(user, permission)
     client, pool = _clients(request)
-    ids = _get_selection(user["username"])
+    ids = await _get_selection(request)
     action = "Approve" if decision == "APPROVED" else "Reject"
     try:
         results = await service.bulk_submit_decision(client, pool, list(ids), decision, user["username"], comment)
@@ -839,10 +883,10 @@ async def bulk_decision_execute(
             400,
             headers=_RETARGET_DIALOG_HEADERS,
         )
-    _clear_selection(user["username"])
+    await _clear_selection(request)
     paged = await _resolve_manager_page(pool, page, query_id)
     permissions = await _user_permissions(user)
-    selected_ids = _get_selection(user["username"])  # empty -- just cleared
+    selected_ids = await _get_selection(request)  # empty -- just cleared
     return _bulk_result_response(
         request,
         action,

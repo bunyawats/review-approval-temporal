@@ -9,7 +9,7 @@
 >       `SessionMemory` class + Redis interaction against `ui-memory:<id>`),
 >       wired into `bff/keycloak_session.py`'s `logout()` cleanup, no
 >       other behavior change yet
-> - [ ] Phase 2 — bulk selection moves from `bff/ui.py`'s in-process
+> - [x] Phase 2 — bulk selection moves from `bff/ui.py`'s in-process
 >       `_bulk_selection` dict to `SessionMemory`
 > - [ ] Phase 3 — pagination resilience fallback: `_resolve_operator_page()`/
 >       `_resolve_manager_page()` consult session memory as a last-resort
@@ -296,6 +296,26 @@ session's `ui-memory:<id>` key directly mid-flow and confirms the
 selection UI degrades to "nothing selected" rather than erroring — same
 spirit as `test_bff_session_store.py`'s missing-entry test for the auth
 session.
+
+**Implemented as described, plus one required test fix** (not a
+deviation in the code, but in what a pre-existing test asserted):
+`test_bulk_select_only_mutates_own_selection` had a block that logged
+out implicitly by opening a *second, brand-new* `TestClient` as
+`operator1` and asserted the first login's selection was still there —
+true under the old username-keyed in-process dict, but no longer true by
+design once selection moved to session-id-keyed Redis memory (a fresh
+login mints a fresh session id — see this file's "Context" section,
+"two separate logins... newly get independent selections instead of
+silently sharing one"). Fixed to assert the new, intended behavior
+instead: selection persists across requests *within* one session
+(a new assertion added to cover this explicitly, since the old test
+only implicitly relied on it), but a genuinely new login starts empty.
+Also added `test_selection_survives_missing_ui_memory_entry_gracefully`,
+covering the "Tests" bullet above. Landed as:
+`review_approval/bff/ui.py` (`_get_selection`/`_clear_selection` now
+`async`, new `_update_selection()`, ~15 call sites updated),
+`tests/integration/test_bff_bulk.py` (one test's assertions corrected,
+one new test added). 112/112 tests pass.
 
 ## Phase 3 — Pagination resilience fallback
 
