@@ -12,6 +12,9 @@ review-approval/
 ├── db/
 │   ├── schema.sql           # applied by db/init/ on first Postgres boot
 │   └── init/
+├── docs/                    # design docs (architecture.html + phased plan docs)
+├── keycloak/                # realm import JSON, get-token.sh, admin/audit scripts
+├── tests/                   # tests/unit (no live services) + tests/integration
 └── review_approval/         # the installable package -- everything else
     ├── app.py               # FastAPI app: assembles bff + api + sandbox routers
     ├── workflow/            # Temporal-side: workflow, activities, worker, task queues
@@ -20,13 +23,16 @@ review-approval/
     │   ├── worker.py
     │   ├── task_queues.py
     │   ├── service.py       # shared business logic -- both bff/ and api/ call this
-    │   └── schemas.py       # per-review-type payload validation registry
+    │   ├── schemas.py       # per-review-type payload validation registry
+    │   ├── keycloak_auth.py # UMA ticket exchange + token refresh (shared by api/ + bff/)
+    │   └── memory_service.py # SessionMemory: Redis-backed bulk selection + pagination fallback
     ├── api/                 # JSON REST surface (real Keycloak auth)
     │   ├── routes.py
     │   └── auth.py
     └── bff/                 # HTMX UI (real Keycloak session auth) + sandbox
         ├── ui.py
         ├── keycloak_session.py
+        ├── session_store.py # Redis-backed /ui/* login session store
         ├── sandbox.py       # /sandbox/* -- standalone htmx experiments
         └── templates/       # Jinja2/HTMX templates, Tailwind via CDN
 ```
@@ -131,8 +137,10 @@ docker compose up --build --scale worker-activity=3
 - Postgres: `localhost:5433` (`temporal`/`temporal`, databases `temporal`
   and `review_approval`) — off the standard `5432` so it doesn't collide
   with a natively-installed Postgres also listening on the host
-- Redis: `localhost:6379` — the `/ui/*` login session store (see
-  `docs/SESSION_STORE_PLAN.md`); the JSON API doesn't use it
+- Redis: `localhost:6379` — the `/ui/*` login session store
+  (`docs/SESSION_STORE_PLAN.md`) plus per-session UI memory for bulk
+  selection and pagination fallback (`docs/SESSION_MEMORY_PLAN.md`); the
+  JSON API doesn't use it
 
 Only `keycloak` (and, for `/ui/*` login, `redis`) are commonly run this
 way while everything else runs natively — see "Running locally" in
@@ -335,11 +343,12 @@ Open **http://localhost:8000** — it redirects to a login screen with a
 
 - **Operator screen** (`/ui/operator`) — shows only *your* requests. "+ New
   Request" opens a dialog to pick a review type and paste a JSON payload.
-  Pending requests can be edited or cancelled; decided/cancelled ones are
-  view-only.
+  Pending requests can be edited or cancelled individually; decided/
+  cancelled ones are view-only.
 - **Manager screen** (`/ui/manager`) — shows *all* requests across every
   operator. Clicking a row opens a dialog with the full JSON payload;
-  pending ones get Approve/Reject buttons, decided ones are view-only.
+  pending ones get Approve/Reject buttons individually, decided ones are
+  view-only.
 
 Both screens are paginated, 10 rows per page, with Prev/Next controls
 and a "Showing X–Y of Z" count. Both also poll every 5 seconds so a
@@ -352,6 +361,17 @@ Operator screen's cache reuse needs an extra check that the manager
 screen's doesn't — the cached filter has to be re-verified against the
 logged-in session before it's trusted, so one operator's session can
 never end up paging through another's requests).
+
+Both screens also support **bulk decisions**: a checkbox column (per
+pending row, plus a "select all on this page" checkbox in the header)
+feeds a selection toolbar showing how many are selected and a Cancel
+button (Operator) or Approve/Reject buttons (Manager). Confirming opens
+a dialog listing every selected request with one shared comment applied
+to all of them, then fires N concurrent decisions and reports per-item
+success/failure. Selection is tracked server-side in Redis, keyed by
+session id (not username, so two separate logins by the same person
+don't share a selection) — see `docs/BULK_ACTIONS_PLAN.md` and
+`docs/SESSION_MEMORY_PLAN.md` for the full design.
 
 The UI calls `review_approval/workflow/service.py` directly (not the
 JSON API) after establishing its own Keycloak-backed session — both
@@ -487,6 +507,24 @@ curl -X POST http://localhost:8000/reviews/search \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": 1, "query_id": "<query_id from previous response>"}'
+```
+
+Bulk decision (as either role -- same permission per `decision` value as
+the single-item route above, capped at 50 ids per call): fans out N
+concurrent decisions and reports a per-item result rather than failing
+the whole batch if one id is already decided or not yours to act on:
+
+```bash
+curl -X POST http://localhost:8000/reviews/bulk/decision \
+  -H "Authorization: Bearer $MANAGER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_ids": ["<id-1>", "<id-2>"],
+    "decision": "APPROVED",
+    "comment": "Batch-approved"
+  }'
+# -> {"results": [{"request_id": "<id-1>", "ok": true, "error": null}, ...],
+#     "succeeded": 2, "failed": 0}
 ```
 
 You can also watch the workflow execute live in the Temporal Web UI at
