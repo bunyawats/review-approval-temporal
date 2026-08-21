@@ -15,7 +15,7 @@
 >       `_resolve_manager_page()` consult session memory as a last-resort
 >       tier before recomputing from scratch, and refresh it whenever they
 >       mint a genuinely new query
-> - [ ] Phase 4 — tests, docs (`CLAUDE.md`, this file's own status)
+> - [x] Phase 4 — tests, docs (`CLAUDE.md`, this file's own status)
 
 ## Context
 
@@ -425,6 +425,25 @@ along the way**:
   update to `bff/ui.py`'s existing bullet removing references to the
   in-process `_bulk_selection` dict. This file's own status tracker
   flipped to "complete."
+
+**Implemented as described.** Full suite re-run clean at 114/114 (no
+regressions from Phases 1–3). `CLAUDE.md` updates landed as a new
+top-level "Per-session UI memory (Redis)... complete" section plus
+targeted fixes to the `bff/ui.py`, Pagination, and Bulk decision
+sections' stale `_bulk_selection`/`_query_cache` references — see commit
+`docs(claude-md): document session-memory work (SESSION_MEMORY_PLAN)`.
+One follow-up beyond this phase's original scope, prompted separately:
+`docs/architecture.html`'s system diagram had no Redis box at all (it
+predates this plan) — added one (with a connector from `bff/ui.py`,
+the only caller — never `workflow/service.py`, never `api/`), verified
+by actually rendering the SVG (`rsvg-convert`) rather than trusting
+hand-checked coordinates, which also caught and fixed two unrelated
+pre-existing layout bugs in that diagram (an arrow cutting through a
+box in two places) — see commit `docs(architecture): add Redis to the
+system diagram`.
+
+**This plan is complete — all 4 phases done, verified against the real
+local stack.**
 
 ## Deliberately out of scope
 
