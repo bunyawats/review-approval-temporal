@@ -503,11 +503,24 @@ or `bff/` respectively; don't put front-door-specific logic in
   three, since `_cancel_dialog.html` was deleted and folded into
   `_detail_dialog.html`), so this reselect target is stable across both.
   **Bulk decision selection (`docs/BULK_ACTIONS_PLAN.md`,
-  `docs/MERGE_CANCEL_DECISION_PLAN.md`)**:
-  `_bulk_selection: dict[str, set[str]]` is an in-process,
-  username-keyed store (`_get_selection()`/`_clear_selection()`) — same
-  "correct without a shared cache, a replica miss just shows unchecked,
-  never wrong data" reasoning as `service.py`'s `_query_cache`.
+  `docs/MERGE_CANCEL_DECISION_PLAN.md`, `docs/SESSION_MEMORY_PLAN.md`)**:
+  selection state lives in Redis now, via `workflow/memory_service.py`'s
+  `SessionMemory.bulk_selection` field, keyed by **session id**, not
+  username — `_get_selection()`/`_clear_selection()` are `async` (an
+  in-process `_bulk_selection: dict[username, set[str]]` used to hold
+  this; removed once `docs/SESSION_MEMORY_PLAN.md`'s Phase 2 landed, the
+  seam those two functions formed being exactly what let the move happen
+  without touching most call sites beyond adding `await`). A new
+  `_update_selection()` covers the checkbox-toggle routes' mutate-and-
+  persist pattern. `RedisError` fails closed to "nothing selected"
+  everywhere (never a 500) — same "a replica miss just shows unchecked,
+  never wrong data" spirit the in-process version leaned on, now actually
+  backed by Redis's own resilience rather than living or dying with one
+  process. Keying by session id rather than username is a deliberate,
+  small behavior change: two tabs in the *same* browser still share one
+  selection (shared cookie, shared session id), but two *separate*
+  logins by the same human no longer silently share one — see
+  `docs/SESSION_MEMORY_PLAN.md`'s "Context" section.
   `POST /ui/{operator,manager}/bulk-select` (`request_ids`, `checked`,
   `page`, `query_id`) is gated by `require_session_role(...)` only,
   **not** `require_permission("Cancel")`/etc. — marking a row "selected"
@@ -526,7 +539,28 @@ or `bff/` respectively; don't put front-door-specific logic in
   logic `operator_list()`/`manager_list()` already had, reused by the
   poll routes, both `bulk-select` routes, and the bulk execute routes
   below — every one of these needs to re-render the same list page a
-  user was already on.
+  user was already on. **Pagination resilience fallback
+  (`docs/SESSION_MEMORY_PLAN.md`'s Phase 3)**: when a supplied `query_id`
+  doesn't resolve via `service.py`'s own in-process `_query_cache`
+  (unknown/expired — e.g. it landed on a different Kubernetes replica
+  than the one that minted it), both `_resolve_*_page()` functions try
+  `_pagination_fallback()` — this session's own Redis memory
+  (`SessionMemory.pagination`) — before falling all the way back to a
+  full `COUNT(*)` recompute. Never authoritative over *which* page to
+  render (the request's own `page`/`query_id` stay the source of truth
+  for that, exactly as before this landed); only ever a resilience
+  recovery for `filter`/`total`. `_pagination_fallback()` re-checks
+  `filter.requester` against the caller for operator screens (mirroring
+  the existing client-`query_id` ownership check just above it — a
+  session's own memory should never actually hold a foreign requester in
+  practice, since `_remember_pagination()` only ever writes the current
+  session's own filter, but the check stays as defense in depth
+  regardless), and skips that check entirely for manager (no requester
+  filter to begin with). `_remember_pagination()` is the write-back half
+  — called **only** when a genuinely new query was just minted (a real
+  recompute happened), deliberately not on every request, so the common
+  case (client's `query_id` already resolves via `service.py`'s cache)
+  adds zero Redis traffic.
   **Select-all checkbox + three-region table split
   (`docs/SELECT_ALL_CHECKBOX_PLAN.md`)**: `_operator_list.html`/
   `_manager_list.html`'s `<table id="request-list">` no longer polls
@@ -577,14 +611,14 @@ or `bff/` respectively; don't put front-door-specific logic in
   "CANCELLED"` server-side the same way `operator_decision()` does for
   the single-item case, so an operator's dialog-open request still
   carries no `decision` field despite hitting the same route shape the
-  manager's does. Neither route takes a `request_ids` param — both read
-  `_get_selection(user["username"])` themselves, since Phase 3 made the
+  manager's does. Neither route takes a `request_ids` param — both call
+  `await _get_selection(request)` themselves, since Phase 3 made the
   server the sole source of truth for selection; the operator's
   `bulk-decision-form` additionally filters `service.get_reviews()`'s
   result to `requester == user["username"]` before rendering the
   preview, defense in depth for the visibility invariant (see below)
-  even though `_bulk_selection[username]` should never actually contain
-  another operator's id in the first place. A `ValueError` from the
+  even though this session's own `SessionMemory` should never actually
+  contain another operator's id in the first place. A `ValueError` from the
   execute call (empty selection, or
   over `_MAX_BULK_SIZE` — reachable if a selection spans enough pages)
   re-renders the confirm dialog with the error via
@@ -1062,7 +1096,13 @@ lookup (BFF) rather than silently returning unfiltered data. The BFF
 `/ui/operator` and `/ui/manager`, round-tripping `query_id` on every
 poll/Prev/Next so the 5s self-poll doesn't re-run `COUNT(*)` every
 cycle — see the Visibility invariant bullet above for how the operator
-screen's cache reuse stays safe across sessions. Read
+screen's cache reuse stays safe across sessions. `_QUERY_CACHE_TTL_S`
+(30s) is public now, renamed `QUERY_CACHE_TTL_S` — reused as-is by the
+BFF's own Redis-backed pagination fallback rather than redeclared (see
+`docs/SESSION_MEMORY_PLAN.md`), and `fetch_reviews_page_only()` is a
+thin public wrapper around `_fetch_reviews_page()` for that same caller,
+which needs a page's actual rows for a `(filter, total)` pair it already
+trusts, without re-running `_count_reviews()`. Read
 `docs/PAGINATION_PLAN.md` before touching `list_reviews_page()` or
 either front door's search/list routes — it has the full phase
 breakdown and the reasoning behind each caching/fallback decision.
@@ -1128,6 +1168,62 @@ Read `docs/SESSION_STORE_PLAN.md` before touching
 login/logout flow — it has the full phase breakdown and the reasoning
 behind the sliding-TTL/refresh design.
 
+## Per-session UI memory (Redis) for pagination fallback + bulk selection: complete
+
+**`docs/SESSION_MEMORY_PLAN.md` has the full design and phased status
+tracker (all 3 phases done, verified against the real local stack)** —
+two pieces of BFF-only state that used to live in-process
+(`bff/ui.py`'s `_bulk_selection` dict, and — for the BFF's own use —
+implicit reliance on `workflow/service.py`'s `_query_cache`) now live in
+Redis instead, under a **new, separate** key from the auth session
+(`ui-memory:<session id>`, alongside `bff/session_store.py`'s
+`ui-session:<session id>`) — a deliberate two-key split, not one merged
+blob, since the auth blob is written rarely (login, ~5-minute refresh)
+while this one is written far more often (every checkbox click), and
+neither module locks its writes, so merging them risks a refresh and a
+selection write silently clobbering each other.
+
+**`workflow/memory_service.py`** (new) holds the `SessionMemory`
+dataclass (`pagination: PaginationMemory | None`, `bulk_selection:
+list[str]`) plus its own Redis I/O (`load()`/`save()`/`delete()`) and
+mutation helpers (`select()`/`deselect()`/`clear_selection()`/
+`set_pagination()`) — framework-agnostic, no FastAPI/Starlette imports,
+mirroring `workflow/keycloak_auth.py`'s placement (shared infrastructure
+`bff/` wraps with the Starlette-specific plumbing). Not used by `api/` —
+REST API callers are stateless bearer-token clients with no login
+session to key this by, so this is reusable-by-position, not
+reusable-in-practice today, an intentional asymmetry with
+`session_store.py`'s BFF-only placement (see that module's own docstring
+for the full reasoning). `SESSION_TTL_SECONDS` itself lives here too,
+not in `session_store.py` — even though it's really "the auth session's
+idle timeout" in meaning, `workflow/` must never import from `bff/`, so
+the shared constant has to live at this lower layer for
+`session_store.py` to import upward from.
+
+`workflow/service.py`'s own `_query_cache` is **untouched** by any of
+this — it's shared REST-API/BFF infrastructure with no session/logout
+concept to hang a lifecycle off of (a REST client has no login to key
+memory by), so it keeps expiring on its own 30-second TTL exactly as
+before; this plan's Redis memory is a *separate*, BFF-only resilience
+layer sitting in front of it, never a replacement.
+
+Two behavior changes worth knowing before assuming old test/debugging
+assumptions still hold: (1) bulk selection is now keyed by **session
+id**, not username — two tabs in the same browser (shared cookie) still
+share one selection, but two separate logins by the same human no longer
+silently do; (2) `_resolve_operator_page()`/`_resolve_manager_page()`
+gained a middle tier (`_pagination_fallback()`) between "trust the
+client's `query_id`" and "recompute from scratch" — see the `bff/ui.py`
+bullet above for the mechanics.
+
+Read `docs/SESSION_MEMORY_PLAN.md` before touching
+`workflow/memory_service.py`, `bff/ui.py`'s selection/pagination-fallback
+helpers, or `workflow/service.py`'s `_query_cache`/`QUERY_CACHE_TTL_S` —
+it has the full phase breakdown, including two design decisions resolved
+during implementation rather than left ambiguous (`SESSION_TTL_SECONDS`'s
+final home, and why a Redis-unreachable pagination read fails closed to
+a full recompute rather than a 500).
+
 ## Bulk decision (cancel / approve / reject): complete
 
 **`docs/BULK_ACTIONS_PLAN.md` has the full design and phased status
@@ -1157,9 +1253,10 @@ same `require_permission`/`check_permission` gates as its single-item
 counterpart. The BFF side adds row checkboxes + a selection toolbar + a
 confirm dialog listing every selected item before executing; the
 non-obvious part is that **selection state lives server-side**
-(`_bulk_selection: dict[username, set[request_id]]` in `bff/ui.py`, same
-"correct without a shared cache, a replica miss just shows unchecked"
-reasoning as `service.py`'s `_query_cache`), not in the browser — every
+(Redis, via `workflow/memory_service.py`'s `SessionMemory` — see
+`docs/SESSION_MEMORY_PLAN.md`; an in-process `_bulk_selection:
+dict[username, set[request_id]]` in `bff/ui.py` held this originally,
+removed once that plan's Phase 2 landed), not in the browser — every
 row render bakes the correct `checked` state in directly, with zero
 custom selection-tracking JS. Selection clears on a fresh page load and
 after a confirmed bulk action; see `bff/ui.py`'s bullet above for the
