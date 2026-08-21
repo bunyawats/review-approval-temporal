@@ -193,17 +193,16 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
     if not code or not state:
         return _render(request, "login.html", {"error": "Missing code/state from Keycloak.", "authorize_url": build_authorize_url(request)}, 400)
     try:
-        await complete_login(request, code, state)
+        role = await complete_login(request, code, state)
     except ValueError as e:
         return _render(request, "login.html", {"error": str(e), "authorize_url": build_authorize_url(request)}, 400)
-    role = request.session["user"]["role"]
     return RedirectResponse(url=f"/ui/{role}", status_code=303)
 
 
 @router.post("/logout")
 async def logout_submit(request: Request):
     redirect_url = logout_redirect_url(request)
-    logout(request)
+    await logout(request)
     return RedirectResponse(url=redirect_url, status_code=303)
 
 

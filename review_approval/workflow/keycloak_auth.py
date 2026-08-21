@@ -79,6 +79,53 @@ class PermissionCheckError(Exception):
     set()" empty-permissions result."""
 
 
+class RefreshFailed(Exception):
+    """The refresh token itself was rejected by Keycloak's token endpoint
+    (expired past ssoSessionIdleTimeout, revoked, or malformed) -- the
+    caller (bff/keycloak_session.py's get_session_user()) treats this the
+    same as a fully expired session: clear it and force re-login."""
+
+
+async def refresh_access_token(refresh_token: str) -> dict:
+    """Exchange a refresh token for a new token set via Keycloak's token
+    endpoint (grant_type=refresh_token). Returns the raw response dict
+    (access_token, refresh_token, expires_in, refresh_expires_in, ...).
+
+    This realm has revokeRefreshToken=false (confirmed live, see
+    docs/SESSION_STORE_PLAN.md), so the refresh token isn't single-use --
+    but Keycloak's response is still stored verbatim by the caller in
+    case that setting ever changes.
+
+    Raises RefreshFailed only when Keycloak actually rejects the refresh
+    token (a real "please log in again" case). A network-level failure
+    (Keycloak unreachable) is deliberately left to propagate as a raw
+    httpx exception rather than folded into RefreshFailed -- an infra
+    outage should surface as a loud failure, not silently log out every
+    active session the moment its access token happens to expire (same
+    "infra failure vs. auth failure" split get_permissions() draws above
+    via PermissionCheckError vs. TokenInvalid).
+    """
+    client_id = os.environ.get("KEYCLOAK_CLIENT_ID")
+    client_secret = os.environ.get("KEYCLOAK_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise RuntimeError("KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET are not set")
+
+    url = f"{_keycloak_issuer()}/protocol/openid-connect/token"
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+        )
+    if response.status_code != 200:
+        raise RefreshFailed(response.text)
+    return response.json()
+
+
 async def get_permissions(access_token: str) -> set[str]:
     """Return the set of Scope names (e.g. "Create") this access token is
     currently granted on the "RequestApproval" resource, via a UMA

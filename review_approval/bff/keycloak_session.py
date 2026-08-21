@@ -3,10 +3,18 @@ Real Keycloak session auth for the /ui/* HTMX UI (Authorization Code
 flow) -- replaces the earlier bff/mock_auth.py (no password, trusted
 whatever role a session cookie claimed).
 
-Session shape: {"username", "role", "access_token", "expires_at"} --
-deliberately NOT refresh_token/id_token (see complete_login()'s
-docstring: all three tokens together measured over the ~4KB limit real
-browsers enforce per cookie, and neither is used by any code here).
+Session shape (see docs/SESSION_STORE_PLAN.md): the browser cookie under
+SESSION_KEY holds only an opaque server-side session id, minted at login
+(session_store.new_session_id()); everything else lives in Redis under
+that id (session_store.py) -- {"username", "role", "access_token",
+"access_expires_at", "refresh_token", "refresh_expires_at"}. This used to
+be the full dict inline in the (signed, but not encrypted) cookie
+itself, deliberately without refresh_token/id_token -- all three tokens
+together measured ~4.5KB signed, over the ~4KB limit real browsers
+enforce per cookie. Moving the token set server-side removes that
+constraint entirely (nothing sensitive ever reaches the browser, and
+there's no size ceiling on what Redis can hold), which is what makes
+storing refresh_token -- and therefore real token refresh -- possible.
 
 Two authorization mechanisms, for two different purposes -- don't
 conflate them:
@@ -27,10 +35,14 @@ conflate them:
   api/auth.py uses for the REST API. Added in Phase 3; see
   keycloak/INTEGRATION_PLAN.md.
 
-No token refresh yet -- access tokens are short-lived (5 min, confirmed
-against this project's realm); once expired, the session is simply
-treated as logged-out and the user re-authenticates. Simple and
-correct, if not maximally convenient -- a reasonable trade for a POC.
+Access-token refresh happens lazily, inside `get_session_user()` (the
+single choke point both mechanisms above call through): an expired
+`access_token` triggers a `workflow.keycloak_auth.refresh_access_token()`
+call using the stored `refresh_token`, transparent to the caller. Only
+when the refresh token itself is rejected (past this realm's 30-minute
+`ssoSessionIdleTimeout`, or revoked) does the session actually end,
+falling back to a re-login -- same outcome as today, just at the
+refresh-token's expiry rather than the much shorter access-token's.
 """
 
 import os
@@ -40,7 +52,9 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import HTTPException, Request
+from redis.exceptions import RedisError
 
+from review_approval.bff import session_store
 from review_approval.workflow import keycloak_auth
 
 SESSION_KEY = "user"
@@ -100,9 +114,11 @@ def build_authorize_url(request: Request) -> str:
     return f"{_issuer()}/protocol/openid-connect/auth?{urlencode(params)}"
 
 
-async def complete_login(request: Request, code: str, state: str) -> None:
+async def complete_login(request: Request, code: str, state: str) -> str:
     """Exchange an authorization code for tokens, validate the returned
-    access token, and store the session.
+    access token, and store the session. Returns the session's role
+    ("operator"/"manager") so callers can redirect without reaching into
+    session/Redis internals themselves.
 
     Raises ValueError on any failure (state mismatch, code exchange
     rejected, no Operator/Manager role) -- callers map that to a
@@ -145,25 +161,26 @@ async def complete_login(request: Request, code: str, state: str) -> None:
             "contact an admin."
         )
 
-    # Deliberately NOT storing refresh_token/id_token here. Starlette's
-    # SessionMiddleware signs the whole session into ONE browser cookie
-    # (itsdangerous, not a server-side store) -- access_token alone is
-    # already ~1.4KB, and all three JWTs together measured ~4.5KB signed,
-    # over the ~4KB limit real browsers enforce per cookie (confirmed by
-    # actually measuring it during development, not assumed -- curl
-    # itself doesn't enforce that limit, so a curl-only test would have
-    # silently passed while a real browser truncated or rejected the
-    # cookie). Neither is used by any code yet anyway (no token refresh
-    # this phase; logout falls back to a client_id-based end-session
-    # call below instead of id_token_hint). Revisit if that changes --
-    # e.g. move to a server-side session store rather than growing this
-    # cookie further.
-    request.session[SESSION_KEY] = {
-        "username": claims.get("preferred_username", claims.get("sub")),
-        "role": role,
-        "access_token": tokens["access_token"],
-        "expires_at": time.time() + tokens.get("expires_in", 300),
-    }
+    # Full token set (including refresh_token, needed for get_session_user()'s
+    # transparent refresh) goes to Redis under a freshly minted session id;
+    # the cookie itself holds only that id -- see this module's docstring
+    # for why (cookie-size limit, no longer a constraint on the token set
+    # since it doesn't live in the cookie at all now).
+    session_id = session_store.new_session_id()
+    await session_store.set(
+        request.app.state.redis,
+        session_id,
+        {
+            "username": claims.get("preferred_username", claims.get("sub")),
+            "role": role,
+            "access_token": tokens["access_token"],
+            "access_expires_at": time.time() + tokens.get("expires_in", 300),
+            "refresh_token": tokens.get("refresh_token"),
+            "refresh_expires_at": time.time() + tokens.get("refresh_expires_in", 0),
+        },
+    )
+    request.session[SESSION_KEY] = session_id
+    return role
 
 
 def logout_redirect_url(request: Request) -> str:
@@ -185,20 +202,67 @@ def logout_redirect_url(request: Request) -> str:
     return f"{_issuer()}/protocol/openid-connect/logout?{urlencode(params)}"
 
 
-def logout(request: Request) -> None:
-    request.session.pop(SESSION_KEY, None)
+async def logout(request: Request) -> None:
+    session_id = request.session.pop(SESSION_KEY, None)
+    if session_id:
+        try:
+            await session_store.delete(request.app.state.redis, session_id)
+        except RedisError:
+            # Cookie is already cleared, which is what actually ends the
+            # browser's session; a stray Redis entry left behind just
+            # expires on its own TTL (SESSION_TTL_SECONDS) rather than
+            # needing this call to succeed.
+            pass
 
 
-def get_session_user(request: Request) -> dict:
-    user = request.session.get(SESSION_KEY)
+async def get_session_user(request: Request) -> dict:
+    session_id = request.session.get(SESSION_KEY)
+    if not session_id:
+        raise RequireLoginRedirect()
+
+    r = request.app.state.redis
+    try:
+        user = await session_store.get(r, session_id)
+    except RedisError:
+        # Session store unreachable -- fail closed to "please log in
+        # again" rather than a raw 500. A transient Redis outage
+        # shouldn't crash every /ui/* route; it should look like an
+        # ordinary expired session.
+        raise RequireLoginRedirect()
     if not user:
+        # Never existed, evicted, or expired via Redis's own TTL -- same
+        # outward behavior as today's missing-cookie case.
         raise RequireLoginRedirect()
-    if time.time() >= user.get("expires_at", 0):
-        # Access token expired -- no refresh yet (a known Phase 2
-        # limitation, see this module's docstring); treat as logged out
-        # rather than silently using a token Keycloak would reject.
-        request.session.pop(SESSION_KEY, None)
-        raise RequireLoginRedirect()
+
+    if time.time() >= user.get("access_expires_at", 0):
+        try:
+            refreshed = await keycloak_auth.refresh_access_token(user["refresh_token"])
+        except keycloak_auth.RefreshFailed:
+            # Refresh token itself is no longer good (past the 30-minute
+            # idle window, or revoked) -- this is a real end of session,
+            # not a transient failure; clear it rather than leaving a
+            # dead entry around until its TTL catches up.
+            try:
+                await session_store.delete(r, session_id)
+            except RedisError:
+                pass
+            request.session.pop(SESSION_KEY, None)
+            raise RequireLoginRedirect()
+
+        user["access_token"] = refreshed["access_token"]
+        user["access_expires_at"] = time.time() + refreshed.get("expires_in", 300)
+        if refreshed.get("refresh_token"):
+            user["refresh_token"] = refreshed["refresh_token"]
+        if "refresh_expires_in" in refreshed:
+            user["refresh_expires_at"] = time.time() + refreshed["refresh_expires_in"]
+        try:
+            await session_store.set(r, session_id, user)
+        except RedisError:
+            # The refreshed tokens are good for this request even if we
+            # couldn't persist them -- worst case, the next request
+            # refreshes again. Don't fail a request that just succeeded.
+            pass
+
     return user
 
 
@@ -210,8 +274,8 @@ def require_session_role(role: str):
     permission checks like require_permission() below.
     """
 
-    def checker(request: Request) -> dict:
-        user = get_session_user(request)
+    async def checker(request: Request) -> dict:
+        user = await get_session_user(request)
         if user["role"] != role:
             raise HTTPException(status_code=403, detail=f"requires role: {role}")
         return user
@@ -235,8 +299,8 @@ async def check_permission(user: dict, permission: str) -> None:
         granted = await keycloak_auth.get_permissions(user["access_token"])
     except keycloak_auth.TokenInvalid:
         # Session's access token itself is no longer valid (expired
-        # between get_session_user()'s own expires_at check and this
-        # call, or rejected for some other reason) -- send back through
+        # between get_session_user()'s own access_expires_at check/refresh
+        # and this call, or rejected for some other reason) -- send back through
         # login rather than a bare 401, consistent with how every other
         # session-auth failure in this module behaves.
         raise RequireLoginRedirect()
@@ -257,7 +321,7 @@ def require_permission(permission: str):
     """
 
     async def checker(request: Request) -> dict:
-        user = get_session_user(request)
+        user = await get_session_user(request)
         await check_permission(user, permission)
         return user
 

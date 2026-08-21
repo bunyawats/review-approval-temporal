@@ -378,25 +378,48 @@ or `bff/` respectively; don't put front-door-specific logic in
   session's `role` field ("operator"/"manager", lowercase, derived once
   at login from `realm_access.roles`) is what `require_session_role()`
   checks — a permanent field, not a bridge slated for removal.
-  **Deliberately does NOT store `refresh_token`/`id_token`** — Starlette's
-  `SessionMiddleware` signs the whole session into one browser cookie
-  (no server-side store), and all three JWTs together measured ~4.5KB
-  signed, over the ~4KB limit real browsers enforce per cookie (measured
-  directly, not assumed — `curl` doesn't enforce that limit, so a
-  curl-only test of this would have silently passed while a real browser
-  failed). No token refresh this phase either, for the same
-  keep-it-small reason plus not being needed yet — an expired access
-  token (5 min lifetime) just forces re-login rather than transparently
-  refreshing. Logout redirects through Keycloak's own end-session
-  endpoint using `client_id` (not `id_token_hint`, since none is
-  stored) — this makes Keycloak show a confirmation page instead of
-  logging out silently (real, documented OIDC RP-initiated-logout
-  behavior, not a bug), a deliberate trade against the cookie-size
-  constraint. See the `keycloak-admin` skill's "Authorization Code flow"
-  section for the exact gotchas hit building this (the `post.logout.
+  **Session storage moved server-side (`docs/SESSION_STORE_PLAN.md`)** —
+  the browser cookie (still Starlette's `SessionMiddleware`, still
+  signed) now holds only an opaque session id minted at login
+  (`session_store.new_session_id()`); the actual session dict —
+  `username`, `role`, `access_token`/`access_expires_at`, and now
+  `refresh_token`/`refresh_expires_at` too — lives in Redis
+  (`bff/session_store.py`), looked up fresh on every request by
+  `get_session_user()` (now `async`). This used to be the literal
+  session dict inline in the cookie, deliberately *without*
+  `refresh_token`/`id_token`, since all three JWTs together measured
+  ~4.5KB signed — over the ~4KB limit real browsers enforce per cookie
+  (measured directly, not assumed — `curl` doesn't enforce that limit,
+  so a curl-only test of this would have silently passed while a real
+  browser failed). Moving the token set to Redis removes that ceiling
+  entirely, which is what makes storing `refresh_token` — and real token
+  refresh — possible; the cookie itself still can't hold anything of
+  meaningful size, but now it doesn't need to.
+  **Access-token refresh is transparent and lazy**, inside
+  `get_session_user()`: an expired `access_token` triggers
+  `workflow/keycloak_auth.refresh_access_token()` using the stored
+  `refresh_token`, and the refreshed pair is written back to Redis before
+  the (now-valid) session is returned to the caller — `require_session_role()`
+  and `require_permission()`'s checkers just `await` this same function,
+  so refresh is picked up everywhere for free. Only when the refresh
+  token itself is rejected (`RefreshFailed` — past this realm's
+  30-minute `ssoSessionIdleTimeout`, or revoked) does the session
+  actually end, same outward "back to `/ui/login`" behavior as before,
+  just at a much longer horizon than the access token's own 5 minutes.
+  `logout()` is `async` now too — it deletes the Redis entry, not just
+  the cookie key, so a logged-out session doesn't leave a stray (if
+  harmless, TTL-bound) entry behind. Logout still redirects through
+  Keycloak's own end-session endpoint using `client_id` (not
+  `id_token_hint`, since no `id_token` is stored — unaffected by this
+  change, `id_token` was never part of what moved to Redis) — this makes
+  Keycloak show a confirmation page instead of logging out silently
+  (real, documented OIDC RP-initiated-logout behavior, not a bug). See
+  the `keycloak-admin` skill's "Authorization Code flow" section for the
+  exact gotchas hit building the original login flow (the `post.logout.
   redirect.uris` client attribute, its `##`-delimited-string format, and
   why the commonly-documented `"+"` shorthand didn't work against this
-  Keycloak version).
+  Keycloak version), and `docs/SESSION_STORE_PLAN.md` for the Redis move
+  and refresh design specifically.
 - **`bff/ui.py`** — server-rendered HTMX screens (`/ui/login`,
   `/ui/operator`, `/ui/manager`). Every route calls `workflow/service.py`,
   never Temporal/Postgres directly.
@@ -994,6 +1017,13 @@ only** — not a preview of the Kubernetes shape below.
 - `UI_SESSION_SECRET` **must** be a Kubernetes Secret shared across all
   `bff` replicas — the code's fallback value only works for a single
   local process.
+- `REDIS_URL` must point at a single Redis reachable from every `bff`
+  replica (e.g. a Kubernetes `Service` in front of a Redis
+  Deployment/StatefulSet, or a managed Redis) — same reasoning as
+  `UI_SESSION_SECRET` above: `/ui/*` sessions live there now (see
+  `docs/SESSION_STORE_PLAN.md`), so a per-pod Redis would mean a session
+  established via one `bff` replica isn't visible to requests load-
+  balanced to another.
 - Postgres `max_connections` needs to account for `asyncpg` pool
   `max_size` × pod replica count across all Deployments running in
   `activity` or `both` mode (workflow-only Deployments never touch
@@ -1037,18 +1067,66 @@ screen's cache reuse stays safe across sessions. Read
 either front door's search/list routes — it has the full phase
 breakdown and the reasoning behind each caching/fallback decision.
 
-## Server-side session store (Redis) + token refresh: planned
+## Server-side session store (Redis) + token refresh: complete
 
 **`docs/SESSION_STORE_PLAN.md` has the full design and phased status
-tracker** — moves the `/ui/*` session (currently entirely inside
-Starlette's signed-but-**not encrypted** `SessionMiddleware` cookie,
-including the raw Keycloak `access_token`) into Redis, with the browser
-cookie holding only an opaque session id, and adds real refresh-token-
-based renewal so a session survives longer than the 5-minute access
-token lifetime — up to 30 minutes of inactivity, matching this realm's
-actual `ssoSessionIdleTimeout` (confirmed live via the Admin API, not
-assumed). Not started; read that file before touching
-`bff/keycloak_session.py`'s session shape or login/logout flow.
+tracker (all 3 phases done, verified against the real local stack —
+Keycloak + Redis + Postgres + Temporal — via
+`tests/integration/test_bff_session_store.py`)** — the `/ui/*` session
+moved out of Starlette's signed-but-**not encrypted** `SessionMiddleware`
+cookie (which used to hold the raw Keycloak `access_token` in plaintext-
+readable form) into Redis (`bff/session_store.py`): the browser cookie
+now holds only an opaque session id
+(`request.session["user"] = "<id>"`), and `ui-session:<id>` in Redis
+holds `{"username", "role", "access_token", "access_expires_at",
+"refresh_token", "refresh_expires_at"}`. `app.py`'s lifespan connects
+`app.state.redis` (`REDIS_URL`) alongside the existing Temporal
+client/Postgres pool.
+
+Real refresh-token-based renewal (`workflow/keycloak_auth.refresh_access_token()`,
+raising `RefreshFailed` on a rejected refresh token) means a session now
+survives up to 30 minutes of *inactivity* — matching this realm's actual
+`ssoSessionIdleTimeout` (confirmed live via the Admin API, not assumed)
+— rather than dying at the access token's 5-minute lifetime.
+`get_session_user()` in `bff/keycloak_session.py` is the single choke
+point that does this: it's now `async`, looks up the session id in
+Redis (sliding the key's TTL forward on every hit — `session_store.get()`),
+and, only if `access_expires_at` has passed, calls `refresh_access_token()`
+and persists the result back before returning. `require_session_role()`'s
+checker and `require_permission()`'s checker both just `await` this same
+function, so every existing call site (all `Depends(...)`, never called
+directly except inside this module) picked up the refresh transparently.
+`logout()` is also `async` now — it deletes the Redis entry in addition
+to popping the cookie key, rather than leaving an orphaned entry to
+expire on its own TTL. `complete_login()` now returns the session's role
+(`"operator"`/`"manager"`) directly, rather than callers reaching into
+`request.session["user"]["role"]` themselves — that raw-dict-access
+pattern in `bff/ui.py`'s `auth_callback()` predated the Redis move and
+would have silently broken (indexing the opaque session-id *string* by
+`"role"`) had it been left as-is; caught and fixed as part of this work,
+not by the original plan doc, which only called for auditing direct
+calls to `get_session_user()`/`logout()`, not raw `request.session[...]`
+reads.
+
+Two failure modes the plan doc didn't originally spell out, resolved
+during implementation rather than left ambiguous: a Redis outage inside
+`get_session_user()`'s lookup is caught (`redis.exceptions.RedisError`)
+and treated as "please log in again" (`RequireLoginRedirect`), not a raw
+500 — consistent with this codebase's existing "degrade gracefully, fail
+closed" pattern for other infra dependencies (see `service.py`'s
+`_wait_until()`); a Keycloak-unreachable failure *during a refresh call*
+is deliberately **not** folded into the same `RefreshFailed` path,
+specifically so a transient network blip can't silently log out every
+active session the instant its access token happens to expire — it's
+left to propagate as a raw exception instead (mirroring
+`get_permissions()`'s own infra-vs-auth exception split,
+`PermissionCheckError` vs. `TokenInvalid`, in
+`workflow/keycloak_auth.py`).
+
+Read `docs/SESSION_STORE_PLAN.md` before touching
+`bff/keycloak_session.py`'s session shape, `bff/session_store.py`, or the
+login/logout flow — it has the full phase breakdown and the reasoning
+behind the sliding-TTL/refresh design.
 
 ## Bulk decision (cancel / approve / reject): complete
 
@@ -1139,9 +1217,6 @@ rebuilding it every 5 seconds; see that file and the `bff/ui.py`/
 - No notification activity (email/Slack) on request creation or decision.
 - `verify_aud=False` in `api/auth.py` — needs a real audience once the
   Keycloak client is finalized.
-- No access-token refresh in `bff/keycloak_session.py` — a 5-minute-old
-  session just forces re-login. Deliberate simplification, not an
-  oversight — see that module's docstring.
 - No caching on either front door's permission checks — every mutating
   action does a live UMA ticket exchange against Keycloak, no RPT/result
   caching. Deliberate ("no caching in the first pass" per

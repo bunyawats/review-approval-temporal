@@ -131,15 +131,18 @@ docker compose up --build --scale worker-activity=3
 - Postgres: `localhost:5433` (`temporal`/`temporal`, databases `temporal`
   and `review_approval`) — off the standard `5432` so it doesn't collide
   with a natively-installed Postgres also listening on the host
+- Redis: `localhost:6379` — the `/ui/*` login session store (see
+  `docs/SESSION_STORE_PLAN.md`); the JSON API doesn't use it
 
-Only `keycloak` alone is commonly run this way while everything else
-runs natively — see "Running locally" in `CLAUDE.md` for that hybrid
-setup (`docker compose up -d keycloak`, nothing else). Note that
-Temporal Web UI's Keycloak login (below) only works via the Dockerized
-`temporal`/`temporal-ui` services — the native `temporal server
-start-dev` CLI's bundled UI has no such option at all, so using this
-means running `temporal`/`temporal-ui` via Compose even in an otherwise
-hybrid/native setup.
+Only `keycloak` (and, for `/ui/*` login, `redis`) are commonly run this
+way while everything else runs natively — see "Running locally" in
+`CLAUDE.md` for that hybrid setup (`docker compose up -d keycloak redis`,
+nothing else — or a natively-installed Redis works just as well, see
+Option B below). Note that Temporal Web UI's Keycloak login (below) only
+works via the Dockerized `temporal`/`temporal-ui` services — the native
+`temporal server start-dev` CLI's bundled UI has no such option at all,
+so using this means running `temporal`/`temporal-ui` via Compose even in
+an otherwise hybrid/native setup.
 
 **Required one-time setup for Temporal Web UI login**: add this to
 `/etc/hosts` (needs `sudo`):
@@ -274,7 +277,28 @@ itself runs in Docker instead, it needs the Docker-internal hostname —
 `docker-compose.yml`'s own `bff` service already sets this correctly
 (`http://keycloak:8080/realms/myrealm`).
 
-#### 4. Python environment
+#### 4. Redis (required for `/ui/*` login)
+
+`/ui/*` sessions live in Redis (see `docs/SESSION_STORE_PLAN.md`) — the
+JSON API doesn't need it. Either a native install:
+
+```bash
+brew install redis
+brew services start redis   # or: redis-server, run in its own terminal
+```
+
+or the Dockerized service alone, same pattern as Keycloak:
+
+```bash
+docker compose up -d redis
+```
+
+`.env.example`'s `REDIS_URL=redis://localhost:6379/0` already matches
+either option for a natively-run `bff`; a Dockerized `bff` needs the
+Docker-internal hostname instead (`docker-compose.yml`'s own `bff`
+service already sets this correctly).
+
+#### 5. Python environment
 
 ```bash
 python3 -m venv .venv
@@ -284,13 +308,13 @@ cp .env.example .env        # edit with your real values
 export $(cat .env | xargs)  # or use a tool like direnv/python-dotenv
 ```
 
-#### 5. Run the worker (separate terminal)
+#### 6. Run the worker (separate terminal)
 
 ```bash
 python -m review_approval.workflow.worker
 ```
 
-#### 6. Run the app (separate terminal)
+#### 7. Run the app (separate terminal)
 
 ```bash
 uvicorn review_approval.app:app --reload --port 8000
@@ -494,11 +518,13 @@ simple.
 - `/ui/*` has real Keycloak login and the same fine-grained permission
   checks as the REST API on every mutating route
   (`review_approval/bff/keycloak_session.py`) — see
-  `keycloak/INTEGRATION_PLAN.md`. No access-token refresh yet (a
-  5-minute-old session just forces re-login), and no caching on either
-  front door's permission checks (every check is a live UMA call). Both
-  are deliberate simplifications, not silent gaps — see `CLAUDE.md`'s
-  "Known gaps".
+  `keycloak/INTEGRATION_PLAN.md`. Sessions are Redis-backed with
+  transparent access-token refresh (`docs/SESSION_STORE_PLAN.md`), so a
+  session survives up to 30 minutes of inactivity, not just the access
+  token's 5-minute lifetime. No caching on either front door's
+  permission checks though (every check is a live UMA call) — a
+  deliberate simplification, not a silent gap — see `CLAUDE.md`'s "Known
+  gaps".
 - `verify_aud=False` in `review_approval/api/auth.py` — set and verify a
   real audience once the Keycloak client is configured.
 - No timeout on "wait for Manager decision" — consider adding a

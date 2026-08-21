@@ -25,6 +25,7 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
+import redis.asyncio as redis
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
@@ -54,8 +55,12 @@ async def lifespan(app: FastAPI):
     app.state.pg_pool = await asyncpg.create_pool(
         dsn=os.environ["DATABASE_URL"], init=_register_jsonb_codec
     )
+    # /ui/* server-side session store (see docs/SESSION_STORE_PLAN.md) --
+    # the JSON API doesn't touch this, only bff/keycloak_session.py.
+    app.state.redis = redis.from_url(os.environ["REDIS_URL"])
     yield
     await app.state.pg_pool.close()
+    await app.state.redis.aclose()
 
 
 app = FastAPI(title="Review/Approval BFF", lifespan=lifespan)

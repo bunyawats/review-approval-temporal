@@ -127,6 +127,7 @@ services:
       - temporal
       - postgres
       - keycloak
+      - redis
     environment:
       DATABASE_URL: postgresql://temporal:temporal@postgres:5432/review_approval
       TEMPORAL_HOST: temporal:7233
@@ -138,9 +139,20 @@ services:
       KEYCLOAK_CLIENT_ID: review-approval
       KEYCLOAK_CLIENT_SECRET: dev-secret-change-me
       UI_SESSION_SECRET: local-compose-dev-secret
+      # /ui/* server-side session store (see docs/SESSION_STORE_PLAN.md).
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     restart: on-failure
+
+  # Server-side store for /ui/* sessions (see docs/SESSION_STORE_PLAN.md)
+  # -- no volume: losing data on a restart just forces re-login, which is
+  # already this design's intended fallback for a missing/evicted
+  # session, not a regression to guard against.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
 
   # Local dev only -- start-dev mode (in-memory H2, no HTTPS). Realm,
   # roles, and demo users are declared in keycloak/import/*.json and

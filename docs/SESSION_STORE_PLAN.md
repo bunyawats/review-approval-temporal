@@ -5,15 +5,35 @@
 > file (same convention as `docs/PAGINATION_PLAN.md` and
 > `keycloak/INTEGRATION_PLAN.md`).
 >
-> - [ ] Phase 1 — Redis infra (Docker service, `bff/session_store.py`,
+> - [x] Phase 1 — Redis infra (Docker service, `bff/session_store.py`,
 >       `app.state.redis` lifespan wiring), no behavior change yet
-> - [ ] Phase 2 — `refresh_access_token()` in `workflow/keycloak_auth.py`,
+> - [x] Phase 2 — `refresh_access_token()` in `workflow/keycloak_auth.py`,
 >       `bff/keycloak_session.py` rewritten to store tokens in Redis
 >       (browser cookie holds only an opaque session id) and transparently
 >       refresh on access-token expiry
-> - [ ] Phase 3 — tests (missing-Redis-entry forces re-login, refresh
+> - [x] Phase 3 — tests (missing-Redis-entry forces re-login, refresh
 >       actually happens and is transparent to the caller), docs
 >       (`CLAUDE.md`, `README.md`) updated to describe the final shape
+>
+> **Implementation notes, beyond the original sketch above:**
+> - `auth_callback()` in `bff/ui.py` used to read
+>   `request.session["user"]["role"]` directly after `complete_login()` --
+>   a raw session-dict access this plan's Phase 2 file list didn't catch
+>   (it only called for auditing direct calls to `get_session_user()`/
+>   `logout()`, not raw `request.session[...]` reads). Under the new shape
+>   `request.session["user"]` is an opaque id string, so this would have
+>   thrown `TypeError` on every successful login. Fixed by having
+>   `complete_login()` return the role directly instead.
+> - Two failure modes not originally specified here, decided during
+>   implementation: `get_session_user()` catches `redis.exceptions.RedisError`
+>   and treats a Redis outage as "please log in again" rather than a raw
+>   500 (fail-closed, matching this codebase's existing degrade-gracefully
+>   pattern elsewhere). A Keycloak-unreachable failure specifically during
+>   a refresh call is deliberately *not* folded into `RefreshFailed` --
+>   `refresh_access_token()` lets a network-level `httpx` error propagate
+>   raw rather than silently logging out every active session on a
+>   transient blip (mirrors `get_permissions()`'s own
+>   `PermissionCheckError` vs. `TokenInvalid` split).
 
 ## Context
 
